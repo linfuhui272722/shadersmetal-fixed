@@ -118,9 +118,9 @@ workflows:
             -F"$SDK/System/Library/Frameworks" \
             -framework Metal -framework Foundation \
             -o build/native/macos-arm64/libmetallum_shaders.dylib "$SRC"
-          mkdir -p src/main/resources/native/macos-arm64
-          cp build/native/macos-arm64/libmetallum_shaders.dylib \
-            src/main/resources/native/macos-arm64/
+          mkdir -p src/main/resources/native/osx-arm64
+         cp build/native/macos-arm64/libmetallum_shaders.dylib \
+         src/main/resources/native/osx-arm64/
           echo "Native arm64 dylib built and bundled."
 
       - name: Build mod jar
