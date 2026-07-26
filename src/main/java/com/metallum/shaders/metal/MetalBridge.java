@@ -24,6 +24,11 @@ public final class MetalBridge {
     private static int lastColorTextureId = -1;
     private static int lastDepthTextureId = -1;
 
+    // 反射缓存
+    private static Field renderTargetField;
+    private static Field colorTextureIdField;
+    private static Field depthTextureIdField;
+
     private MetalBridge() {}
 
     public static synchronized void init() {
@@ -64,27 +69,22 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 纹理获取 - 从 Minecraft 的 RenderTarget 中获取
+    // 纹理获取 - 通过反射从 Minecraft 的 RenderTarget 中获取
     // =====================================================================
 
     /**
-     * 获取主颜色纹理句柄（从 Minecraft 的 RenderTarget 中获取）
+     * 获取主颜色纹理句柄
      * 对应 Yarn: MinecraftClient.getFramebuffer() -> Mojang: Minecraft.mainRenderTarget
      */
     public static long getMainColorTextureHandle() {
         if (!isAvailable()) return -1L;
         
         try {
-            Minecraft mc = Minecraft.getInstance();
-            RenderTarget renderTarget = mc.mainRenderTarget;
-            if (renderTarget == null) {
-                return -1L;
-            }
+            RenderTarget renderTarget = getRenderTarget();
+            if (renderTarget == null) return -1L;
             
             int textureId = getRenderTargetColorTextureId(renderTarget);
-            if (textureId <= 0) {
-                return -1L;
-            }
+            if (textureId <= 0) return -1L;
             
             if (textureId == lastColorTextureId && cachedColorTextureHandle != -1L) {
                 return cachedColorTextureHandle;
@@ -104,16 +104,11 @@ public final class MetalBridge {
         if (!isAvailable()) return -1L;
         
         try {
-            Minecraft mc = Minecraft.getInstance();
-            RenderTarget renderTarget = mc.mainRenderTarget;
-            if (renderTarget == null) {
-                return -1L;
-            }
+            RenderTarget renderTarget = getRenderTarget();
+            if (renderTarget == null) return -1L;
             
             int textureId = getRenderTargetDepthTextureId(renderTarget);
-            if (textureId <= 0) {
-                return -1L;
-            }
+            if (textureId <= 0) return -1L;
             
             if (textureId == lastDepthTextureId && cachedDepthTextureHandle != -1L) {
                 return cachedDepthTextureHandle;
@@ -156,11 +151,27 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 反射辅助方法 - 使用 Mojang 映射
+    // 反射辅助方法
     // =====================================================================
 
-    private static Field colorTextureIdField;
-    private static Field depthTextureIdField;
+    private static RenderTarget getRenderTarget() throws Exception {
+        if (renderTargetField == null) {
+            // 尝试多个可能的字段名
+            String[] names = {"mainRenderTarget", "framebuffer", "frameBuffer", "fbo"};
+            for (String name : names) {
+                try {
+                    renderTargetField = Minecraft.class.getDeclaredField(name);
+                    renderTargetField.setAccessible(true);
+                    break;
+                } catch (NoSuchFieldException ignored) {}
+            }
+            if (renderTargetField == null) {
+                LOGGER.warn("Cannot find RenderTarget field in Minecraft");
+                return null;
+            }
+        }
+        return (RenderTarget) renderTargetField.get(Minecraft.getInstance());
+    }
 
     private static int getRenderTargetColorTextureId(RenderTarget target) throws Exception {
         if (colorTextureIdField == null) {
@@ -173,6 +184,7 @@ public final class MetalBridge {
                 } catch (NoSuchFieldException ignored) {}
             }
             if (colorTextureIdField == null) {
+                // 尝试通过 getColorTextureId() 方法获取
                 try {
                     java.lang.reflect.Method m = RenderTarget.class.getMethod("getColorTextureId");
                     return (int) m.invoke(target);
