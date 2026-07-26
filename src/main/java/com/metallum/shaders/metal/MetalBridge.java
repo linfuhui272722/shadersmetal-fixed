@@ -25,7 +25,7 @@ public final class MetalBridge {
     private static int lastColorTextureId = -1;
     private static int lastDepthTextureId = -1;
 
-    // 反射缓存（仅作为备选，优先使用方法）
+    // 反射缓存
     private static Field renderTargetField;
     private static Field colorTextureIdField;
     private static Field depthTextureIdField;
@@ -35,6 +35,9 @@ public final class MetalBridge {
     private static Method getRenderTargetMethod;
     private static Method getColorTextureIdMethod;
     private static Method getDepthTextureIdMethod;
+
+    // 调试标志
+    private static volatile boolean debugPrinted = false;
 
     private MetalBridge() {}
 
@@ -81,22 +84,22 @@ public final class MetalBridge {
 
     public static long getMainColorTextureHandle() {
         if (!isAvailable()) return -1L;
-        
+
         try {
             RenderTarget renderTarget = getRenderTarget();
             if (renderTarget == null) return -1L;
-            
+
             int textureId = getRenderTargetColorTextureId(renderTarget);
             if (textureId <= 0) return -1L;
-            
+
             if (textureId == lastColorTextureId && cachedColorTextureHandle != -1L) {
                 return cachedColorTextureHandle;
             }
             lastColorTextureId = textureId;
-            
+
             cachedColorTextureHandle = MetalNative.getMetalTextureFromGLTexture(textureId);
             return cachedColorTextureHandle;
-            
+
         } catch (Throwable t) {
             LOGGER.warn("Failed to get main color texture", t);
             return -1L;
@@ -105,22 +108,22 @@ public final class MetalBridge {
 
     public static long getMainDepthTextureHandle() {
         if (!isAvailable()) return -1L;
-        
+
         try {
             RenderTarget renderTarget = getRenderTarget();
             if (renderTarget == null) return -1L;
-            
+
             int textureId = getRenderTargetDepthTextureId(renderTarget);
             if (textureId <= 0) return -1L;
-            
+
             if (textureId == lastDepthTextureId && cachedDepthTextureHandle != -1L) {
                 return cachedDepthTextureHandle;
             }
             lastDepthTextureId = textureId;
-            
+
             cachedDepthTextureHandle = MetalNative.getMetalTextureFromGLTexture(textureId);
             return cachedDepthTextureHandle;
-            
+
         } catch (Throwable t) {
             LOGGER.warn("Failed to get main depth texture", t);
             return -1L;
@@ -128,7 +131,6 @@ public final class MetalBridge {
     }
 
     public static Optional<Long> getMainNormalTextureHandle() {
-        // 大多数渲染目标没有法线纹理
         return Optional.empty();
     }
 
@@ -159,18 +161,41 @@ public final class MetalBridge {
     // =====================================================================
 
     private static RenderTarget getRenderTarget() throws Exception {
+        // ★ 调试：首次调用时打印所有相关方法
+        if (!debugPrinted) {
+            debugPrinted = true;
+            System.err.println("[MetallumShaders] Debug: Scanning Minecraft methods for RenderTarget:");
+            Method[] methods = Minecraft.class.getDeclaredMethods();
+            for (Method m : methods) {
+                if (m.getReturnType() == RenderTarget.class ||
+                    m.getName().toLowerCase().contains("framebuffer") ||
+                    m.getName().toLowerCase().contains("render") ||
+                    m.getName().toLowerCase().contains("target")) {
+                    System.err.println("[MetallumShaders]   " + m.getName() + " -> " + m.getReturnType().getSimpleName());
+                }
+            }
+            // 再打印所有返回 RenderTarget 的字段（也可能有用）
+            Field[] fields = Minecraft.class.getDeclaredFields();
+            for (Field f : fields) {
+                if (f.getType() == RenderTarget.class) {
+                    System.err.println("[MetallumShaders]   Field: " + f.getName() + " -> " + f.getType().getSimpleName());
+                }
+            }
+        }
+
         // 1. 尝试通过 getFramebuffer() 方法（Mojang 映射）
         if (getFramebufferMethod == null) {
             try {
                 getFramebufferMethod = Minecraft.class.getMethod("getFramebuffer");
             } catch (NoSuchMethodException ignored) {
-                // 忽略，尝试其他方法
+                // 忽略
             }
         }
         if (getFramebufferMethod != null) {
             try {
                 Object result = getFramebufferMethod.invoke(Minecraft.getInstance());
                 if (result instanceof RenderTarget) {
+                    System.err.println("[MetallumShaders] Found RenderTarget via getFramebuffer()");
                     return (RenderTarget) result;
                 }
             } catch (Exception e) {
@@ -190,6 +215,7 @@ public final class MetalBridge {
             try {
                 Object result = getRenderTargetMethod.invoke(Minecraft.getInstance());
                 if (result instanceof RenderTarget) {
+                    System.err.println("[MetallumShaders] Found RenderTarget via getRenderTarget()");
                     return (RenderTarget) result;
                 }
             } catch (Exception e) {
@@ -197,7 +223,23 @@ public final class MetalBridge {
             }
         }
 
-        // 3. 最后尝试字段（备选）
+        // 3. 尝试通过 getMainRenderTarget() 等方法（常见备选）
+        String[] methodNames = {"getMainRenderTarget", "getRenderTarget", "getFramebuffer", "getFrameBuffer"};
+        for (String name : methodNames) {
+            try {
+                Method m = Minecraft.class.getMethod(name);
+                Object result = m.invoke(Minecraft.getInstance());
+                if (result instanceof RenderTarget) {
+                    System.err.println("[MetallumShaders] Found RenderTarget via " + name + "()");
+                    return (RenderTarget) result;
+                }
+            } catch (NoSuchMethodException ignored) {
+            } catch (Exception e) {
+                LOGGER.debug(name + "() failed", e);
+            }
+        }
+
+        // 4. 尝试字段（备选）
         if (renderTargetField == null) {
             // 只扫描一次，不重复输出调试信息
             Field[] fields = Minecraft.class.getDeclaredFields();
@@ -205,7 +247,7 @@ public final class MetalBridge {
                 if (RenderTarget.class.isAssignableFrom(f.getType())) {
                     renderTargetField = f;
                     renderTargetField.setAccessible(true);
-                    LOGGER.info("Found RenderTarget field via fallback: {}", f.getName());
+                    System.err.println("[MetallumShaders] Found RenderTarget field via fallback: " + f.getName());
                     break;
                 }
             }
@@ -253,7 +295,7 @@ public final class MetalBridge {
                 try {
                     colorTextureIdField = RenderTarget.class.getDeclaredField(name);
                     colorTextureIdField.setAccessible(true);
-                    LOGGER.info("Found color texture field via fallback: {}", name);
+                    System.err.println("[MetallumShaders] Found color texture field via fallback: " + name);
                     break;
                 } catch (NoSuchFieldException ignored) {
                 }
@@ -290,7 +332,7 @@ public final class MetalBridge {
                 try {
                     depthTextureIdField = RenderTarget.class.getDeclaredField(name);
                     depthTextureIdField.setAccessible(true);
-                    LOGGER.info("Found depth texture field via fallback: {}", name);
+                    System.err.println("[MetallumShaders] Found depth texture field via fallback: " + name);
                     break;
                 } catch (NoSuchFieldException ignored) {
                 }
