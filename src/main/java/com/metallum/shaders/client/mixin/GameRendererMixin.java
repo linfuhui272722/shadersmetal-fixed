@@ -46,7 +46,8 @@ public abstract class GameRendererMixin {
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
-        if (cmdBuffer == 0 || colorSrc == 0) {
+        // ★ 修复：如果句柄无效（<=0），提前返回，避免 Native 崩溃
+        if (cmdBuffer <= 0 || colorSrc <= 0) {
             return;
         }
 
@@ -79,8 +80,7 @@ public abstract class GameRendererMixin {
         
         uniformData.flip();
 
-        // ★ 修复：将 Direct ByteBuffer 转换为普通字节数组
-        // DirectBuffer 不支持 array()，必须使用 get() 方法复制数据
+        // 将 Direct ByteBuffer 转换为普通字节数组
         byte[] uniformBytes = new byte[uniformData.remaining()];
         uniformData.get(uniformBytes);
 
