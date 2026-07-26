@@ -124,6 +124,9 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     desc.depthAttachmentPixelFormat = (MTLPixelFormat) depthFormat;
     desc.colorAttachments[0].blendingEnabled = NO;
 
+    // 额外日志：确认设置后的值
+    NSLog(@"[MetallumShaders]   After assignment: depthAttachmentPixelFormat = %d", (int)desc.depthAttachmentPixelFormat);
+
     NSError* err = nil;
     id<MTLRenderPipelineState> pipe =
         [device newRenderPipelineStateWithDescriptor:desc error:&err];
