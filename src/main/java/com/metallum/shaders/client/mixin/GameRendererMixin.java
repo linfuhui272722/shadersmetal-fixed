@@ -3,10 +3,9 @@ package com.metallum.shaders.client.mixin;
 import com.metallum.shaders.metal.MetalBridge;
 import com.metallum.shaders.shader.ShaderManager;
 import com.metallum.shaders.jni.MetalNative;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
-import net.minecraft.client.renderer.LightTexture;
 import org.joml.Matrix4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -24,7 +23,7 @@ public abstract class GameRendererMixin {
      * 在 Minecraft 渲染完一帧后，立即调用 Metal Shader 进行后处理。
      */
     @Inject(method = "render", at = @At("RETURN"))
-    private void metallum_shaders$postRender(float partialTick, long nanoTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, LightTexture lightTexture, Matrix4f projectionMatrix, CallbackInfo ci) {
+    private void metallum_shaders$postRender(float partialTick, long nanoTime, boolean renderBlockOutline, Camera camera, GameRenderer gameRenderer, Matrix4f projectionMatrix, CallbackInfo ci) {
         
         // 1. 确保已初始化
         ShaderManager.init();
@@ -67,9 +66,9 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(time);              // Offset 0: Time
         uniformData.putFloat(width);             // Offset 4: Screen Width
         uniformData.putFloat(height);            // Offset 8: Screen Height
-        uniformData.putFloat((float)camera.getPosition().x); // Offset 12: Cam X
-        uniformData.putFloat((float)camera.getPosition().y); // Offset 16: Cam Y
-        uniformData.putFloat((float)camera.getPosition().z); // Offset 20: Cam Z
+        uniformData.putFloat((float)camera.position().x); // Offset 12: Cam X (修改处1: getPosition() -> position())
+        uniformData.putFloat((float)camera.position().y); // Offset 16: Cam Y (修改处2)
+        uniformData.putFloat((float)camera.position().z); // Offset 20: Cam Z (修改处3)
         
         uniformData.flip(); // 准备读取
 
