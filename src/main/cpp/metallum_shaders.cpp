@@ -28,7 +28,6 @@ extern "C" {
 // =========================================================================
 // getDefaultDevice
 //   Java: MetalNative.getDefaultDevice()
-//   Returns a retained jlong pointing to the system default MTLDevice.
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv* env, jclass) {
@@ -38,8 +37,6 @@ Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv* env, jclass) 
             NSLog(@"[MetallumShaders] Failed to create default MTLDevice");
             return 0LL;
         }
-        // Retain the device and hand ownership to Java.
-        // The Java side will call MetalNative.release(handle) when done.
         return (jlong)(__bridge_retained void*)device;
     }
 }
@@ -61,7 +58,7 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
     NSString* name   = [NSString stringWithUTF8String:nm];
 
     MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-    opts.languageVersion = MTLLanguageVersion2_3;  // iOS 15.5 supports up to 2.3
+    opts.languageVersion = MTLLanguageVersion2_3;
 
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:source
@@ -74,7 +71,6 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
     env->ReleaseStringUTFChars(sourceJ, src);
     env->ReleaseStringUTFChars(nameJ, nm);
 
-    // Hand ownership of `lib` to the Java side (retained jlong).
     return (jlong) (__bridge_retained void*) lib;
 }
 
@@ -91,7 +87,6 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     jstring vertexNameJ, jstring fragmentNameJ,
     jint colorFormat, jint depthFormat) {
 
-    // === 关键日志：打印接收到的所有参数，用于调试 ===
     NSLog(@"[MetallumShaders] buildPostPipeline: device=0x%llx, library=0x%llx",
           (unsigned long long)deviceHandle, (unsigned long long)libraryHandle);
     NSLog(@"[MetallumShaders]   colorFormat=%d, depthFormat=%d", (int)colorFormat, (int)depthFormat);
@@ -123,7 +118,7 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     desc.colorAttachments[0].pixelFormat = (MTLPixelFormat) colorFormat;
     desc.colorAttachments[0].blendingEnabled = NO;
 
-    // ★ 修复：使用 Metal 枚举而不是硬编码值
+    // 深度格式处理
     if (depthFormat == 55) {
         desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     } else if (depthFormat == 0) {
@@ -131,8 +126,6 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     } else {
         desc.depthAttachmentPixelFormat = (MTLPixelFormat) depthFormat;
     }
-
-    // 额外日志：确认设置后的值
     NSLog(@"[MetallumShaders]   After assignment: depthAttachmentPixelFormat = %d", (int)desc.depthAttachmentPixelFormat);
 
     NSError* err = nil;
@@ -179,7 +172,6 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     desc.colorAttachments[0].texture = colorDst;
     desc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
-    // No depth attachment — we only sample depth, we don't write it.
 
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:desc];
     [enc setRenderPipelineState:pipe];
@@ -220,13 +212,66 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 // =========================================================================
 // release
 //   Java: MetalNative.release(long handle)
-//   Takes ownership back from the jlong and lets ARC release it.
 // =========================================================================
 JNIEXPORT void JNICALL
 Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv*, jclass, jlong handle) {
     if (!handle) return;
     id obj = (__bridge_transfer id)(void*) handle;
-    (void) obj; // ARC releases `obj` at end of scope
+    (void) obj;
+}
+
+// =========================================================================
+// ★ 新增：getMetalTextureFromGLTexture
+//   Java: MetalNative.getMetalTextureFromGLTexture(int textureId)
+//   目前为存根实现，因为无法直接从 OpenGL 纹理 ID 获取 Metal 纹理句柄。
+//   此处返回 0，表示无效句柄。
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(
+    JNIEnv* env, jclass, jint textureId) {
+
+    if (textureId <= 0) return 0LL;
+
+    // 警告：此功能需要底层图形库（如 ANGLE / MobileGlues）提供扩展支持。
+    // 当前 iOS 上无法通过标准的 OpenGL ES API 获取 Metal 纹理句柄。
+    // 返回 0 表示无效。
+    NSLog(@"[MetallumShaders] getMetalTextureFromGLTexture(%d) called - unsupported, returning 0", textureId);
+    return 0LL;
+}
+
+// =========================================================================
+// ★ 新增：getDefaultCommandQueue
+//   Java: MetalNative.getDefaultCommandQueue()
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(
+    JNIEnv* env, jclass) {
+
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (!device) return 0LL;
+
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        return (jlong)(__bridge_retained void*)queue;
+    }
+}
+
+// =========================================================================
+// ★ 新增：createCommandBuffer
+//   Java: MetalNative.createCommandBuffer()
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_createCommandBuffer(
+    JNIEnv* env, jclass) {
+
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (!device) return 0LL;
+
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        id<MTLCommandBuffer> buffer = [queue commandBuffer];
+        return (jlong)(__bridge_retained void*)buffer;
+    }
 }
 
 } // extern "C"
