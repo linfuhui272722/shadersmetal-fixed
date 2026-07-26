@@ -12,30 +12,11 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
-
-    // 缓存反射 Field，避免重复查找
-    private static Field cameraField;
-    static {
-        try {
-            // 使用 Mojang 映射的字段名 "camera"
-            cameraField = GameRenderer.class.getDeclaredField("camera");
-            cameraField.setAccessible(true);
-        } catch (NoSuchFieldException e) {
-            // 如果字段名不对，尝试备选名称（Yarn 映射为 "camera"）
-            try {
-                cameraField = GameRenderer.class.getDeclaredField("camera");
-                cameraField.setAccessible(true);
-            } catch (NoSuchFieldException ex) {
-                System.err.println("[MetallumShaders] Failed to find camera field: " + ex.getMessage());
-            }
-        }
-    }
 
     /**
      * 核心渲染注入点。
@@ -78,8 +59,8 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // ★ 使用反射获取 Camera
-        Camera camera = getCameraFromGameRenderer();
+        // ★ 正确方式：从 Minecraft 实例获取 Camera（public 字段）
+        Camera camera = Minecraft.getInstance().camera;
         if (camera != null) {
             uniformData.putFloat((float) camera.position().x);
             uniformData.putFloat((float) camera.position().y);
@@ -110,22 +91,6 @@ public abstract class GameRendererMixin {
         
         if (result != 0) {
              System.err.println("[MetallumShaders] dispatchFullscreen failed with code: " + result);
-        }
-    }
-
-    /**
-     * 通过反射获取 GameRenderer 的 camera 字段
-     */
-    private Camera getCameraFromGameRenderer() {
-        if (cameraField == null) {
-            return null;
-        }
-        try {
-            // this 是 GameRenderer 实例（因为 Mixin 混入到 GameRenderer 中）
-            return (Camera) cameraField.get(this);
-        } catch (IllegalAccessException e) {
-            System.err.println("[MetallumShaders] Failed to get camera via reflection: " + e.getMessage());
-            return null;
         }
     }
 
