@@ -26,10 +26,14 @@ public final class MetalBridge {
 
     // 反射缓存
     private static Field renderTargetField;
-    private static Field colorTextureHandleField;
-    private static Field depthTextureHandleField;
+    private static Field colorTextureField;
+    private static Field depthTextureField;
     private static Method getColorTextureMethod;
     private static Method getDepthTextureMethod;
+
+    // 诊断标志
+    private static boolean colorTextureDiagnosed = false;
+    private static boolean depthTextureDiagnosed = false;
 
     private MetalBridge() {}
 
@@ -80,7 +84,6 @@ public final class MetalBridge {
         try {
             long handle = getRenderTargetColorTextureHandle();
             if (handle <= 0) return -1L;
-            
             if (handle == cachedColorTextureHandle) {
                 return cachedColorTextureHandle;
             }
@@ -146,7 +149,7 @@ public final class MetalBridge {
         RenderTarget target = getRenderTarget();
         if (target == null) return -1L;
 
-        // 1. 尝试通过 getColorTexture() 方法（如果返回 MetalGpuTexture）
+        // 1. 尝试通过 getColorTexture() 方法
         if (getColorTextureMethod == null) {
             try {
                 getColorTextureMethod = RenderTarget.class.getMethod("getColorTexture");
@@ -156,7 +159,7 @@ public final class MetalBridge {
             try {
                 Object tex = getColorTextureMethod.invoke(target);
                 if (tex != null) {
-                    long handle = extractMetalHandle(tex);
+                    long handle = extractMetalHandle(tex, "Color");
                     if (handle > 0) return handle;
                 }
             } catch (Exception e) {
@@ -164,25 +167,32 @@ public final class MetalBridge {
             }
         }
 
-        // 2. 备选：通过字段 colorTexture（或其他名称）
-        if (colorTextureHandleField == null) {
-            String[] fieldNames = {"colorTexture", "colorTex", "texture", "mainColorTexture"};
+        // 2. 备选：通过字段
+        if (colorTextureField == null) {
+            String[] fieldNames = {"colorTexture", "colorTex", "texture", "mainColorTexture", "colorBuffer"};
             for (String name : fieldNames) {
                 try {
-                    colorTextureHandleField = RenderTarget.class.getDeclaredField(name);
-                    colorTextureHandleField.setAccessible(true);
+                    colorTextureField = RenderTarget.class.getDeclaredField(name);
+                    colorTextureField.setAccessible(true);
                     LOGGER.info("Found color texture field: {}", name);
                     break;
                 } catch (NoSuchFieldException ignored) {}
             }
-            if (colorTextureHandleField == null) {
-                LOGGER.error("Cannot find color texture field/method");
+            if (colorTextureField == null) {
+                // 诊断：打印所有字段
+                if (!colorTextureDiagnosed) {
+                    colorTextureDiagnosed = true;
+                    LOGGER.warn("Cannot find color texture field in RenderTarget, available fields:");
+                    for (Field f : RenderTarget.class.getDeclaredFields()) {
+                        LOGGER.warn("  {} : {}", f.getName(), f.getType().getName());
+                    }
+                }
                 return -1L;
             }
         }
-        Object tex = colorTextureHandleField.get(target);
+        Object tex = colorTextureField.get(target);
         if (tex == null) return -1L;
-        return extractMetalHandle(tex);
+        return extractMetalHandle(tex, "Color");
     }
 
     private static long getRenderTargetDepthTextureHandle() throws Exception {
@@ -199,7 +209,7 @@ public final class MetalBridge {
             try {
                 Object tex = getDepthTextureMethod.invoke(target);
                 if (tex != null) {
-                    long handle = extractMetalHandle(tex);
+                    long handle = extractMetalHandle(tex, "Depth");
                     if (handle > 0) return handle;
                 }
             } catch (Exception e) {
@@ -207,62 +217,82 @@ public final class MetalBridge {
             }
         }
 
-        // 2. 备选：通过字段 depthTexture
-        if (depthTextureHandleField == null) {
+        // 2. 备选：通过字段
+        if (depthTextureField == null) {
             String[] fieldNames = {"depthTexture", "depthTex", "depthBuffer"};
             for (String name : fieldNames) {
                 try {
-                    depthTextureHandleField = RenderTarget.class.getDeclaredField(name);
-                    depthTextureHandleField.setAccessible(true);
+                    depthTextureField = RenderTarget.class.getDeclaredField(name);
+                    depthTextureField.setAccessible(true);
                     LOGGER.info("Found depth texture field: {}", name);
                     break;
                 } catch (NoSuchFieldException ignored) {}
             }
-            if (depthTextureHandleField == null) {
-                LOGGER.warn("Cannot find depth texture field/method");
+            if (depthTextureField == null) {
+                if (!depthTextureDiagnosed) {
+                    depthTextureDiagnosed = true;
+                    LOGGER.warn("Cannot find depth texture field in RenderTarget");
+                }
                 return -1L;
             }
         }
-        Object tex = depthTextureHandleField.get(target);
+        Object tex = depthTextureField.get(target);
         if (tex == null) return -1L;
-        return extractMetalHandle(tex);
+        return extractMetalHandle(tex, "Depth");
     }
 
     /**
      * 从 MetalGpuTexture 对象中提取 Metal 纹理句柄（long）
      */
-    private static long extractMetalHandle(Object texObj) throws Exception {
-        // 尝试获取 handle 字段（long）
+    private static long extractMetalHandle(Object texObj, String textureType) throws Exception {
+        if (texObj == null) return -1L;
         Class<?> clazz = texObj.getClass();
-        // 如果类名包含 "MetalGpuTexture"，则直接提取
-        if (clazz.getSimpleName().contains("MetalGpuTexture") || clazz.getName().contains("MetalGpuTexture")) {
+        LOGGER.info("Extracting {} handle from class: {}", textureType, clazz.getName());
+
+        // 如果直接是 Long 或 Number
+        if (texObj instanceof Long) return (Long) texObj;
+        if (texObj instanceof Number) return ((Number) texObj).longValue();
+
+        // 尝试常见字段名
+        String[] fieldNames = {"handle", "textureHandle", "metalTextureHandle", "nativeHandle", "pointer", "ptr", "address", "texture"};
+        for (String name : fieldNames) {
             try {
-                Field handleField = clazz.getDeclaredField("handle");
-                handleField.setAccessible(true);
-                return (long) handleField.get(texObj);
-            } catch (NoSuchFieldException e) {
-                // 尝试其他字段名
-                try {
-                    Field ptrField = clazz.getDeclaredField("pointer");
-                    ptrField.setAccessible(true);
-                    return (long) ptrField.get(texObj);
-                } catch (NoSuchFieldException ignored) {}
-                try {
-                    Field nativePtrField = clazz.getDeclaredField("nativePtr");
-                    nativePtrField.setAccessible(true);
-                    return (long) nativePtrField.get(texObj);
-                } catch (NoSuchFieldException ignored) {}
+                Field field = clazz.getDeclaredField(name);
+                field.setAccessible(true);
+                Object value = field.get(texObj);
+                if (value instanceof Long) {
+                    long h = (Long) value;
+                    if (h > 0) {
+                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, name);
+                        return h;
+                    }
+                } else if (value instanceof Number) {
+                    long h = ((Number) value).longValue();
+                    if (h > 0) {
+                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, name);
+                        return h;
+                    }
+                } else {
+                    LOGGER.debug("Field {} is of type {} not a number", name, value != null ? value.getClass().getName() : "null");
+                }
+            } catch (NoSuchFieldException ignored) {
+            } catch (Exception e) {
+                LOGGER.warn("Error accessing field {}: {}", name, e.getMessage());
             }
         }
-        // 如果直接是 Long 类型，则直接返回
-        if (texObj instanceof Long) {
-            return (Long) texObj;
+
+        // 如果没有找到，打印所有字段帮助诊断
+        LOGGER.warn("Could not extract {} handle from {}. Fields:", textureType, clazz.getName());
+        for (Field f : clazz.getDeclaredFields()) {
+            f.setAccessible(true);
+            try {
+                Object val = f.get(texObj);
+                LOGGER.warn("  {} = {} (type {})", f.getName(), val, val != null ? val.getClass().getSimpleName() : "null");
+            } catch (Exception e) {
+                LOGGER.warn("  {} : access error", f.getName());
+            }
         }
-        if (texObj instanceof Number) {
-            return ((Number) texObj).longValue();
-        }
-        // 尝试通过 toString 或其他方式（不推荐）
-        LOGGER.warn("Unable to extract handle from object of type {}", texObj.getClass().getName());
+
         return -1L;
     }
 
@@ -270,7 +300,6 @@ public final class MetalBridge {
         // 1.21 版本：从 GameRenderer 获取 mainRenderTarget
         GameRenderer gameRenderer = Minecraft.getInstance().gameRenderer;
         if (gameRenderer != null) {
-            // 尝试直接访问字段
             if (renderTargetField == null) {
                 try {
                     renderTargetField = GameRenderer.class.getDeclaredField("mainRenderTarget");
