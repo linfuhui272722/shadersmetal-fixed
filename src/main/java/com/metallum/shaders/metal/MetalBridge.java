@@ -243,6 +243,7 @@ public final class MetalBridge {
 
     /**
      * 从 MetalGpuTexture 对象中提取 Metal 纹理句柄（long）
+     * 支持 MemorySegment 类型的 nativeHandle 字段
      */
     private static long extractMetalHandle(Object texObj, String textureType) throws Exception {
         if (texObj == null) return -1L;
@@ -252,6 +253,36 @@ public final class MetalBridge {
         // 如果直接是 Long 或 Number
         if (texObj instanceof Long) return (Long) texObj;
         if (texObj instanceof Number) return ((Number) texObj).longValue();
+
+        // 检查是否为 MemorySegment，尝试调用 address() 或获取 address 字段
+        if (clazz.getName().contains("MemorySegment")) {
+            try {
+                // 尝试调用 address() 方法
+                Method addressMethod = clazz.getMethod("address");
+                Object addr = addressMethod.invoke(texObj);
+                if (addr instanceof Long) {
+                    long h = (Long) addr;
+                    if (h > 0) {
+                        LOGGER.info("Extracted {} handle {} via MemorySegment.address()", textureType, h);
+                        return h;
+                    }
+                }
+            } catch (NoSuchMethodException e) {
+                // 如果 address() 方法不存在，尝试获取 address 字段
+                try {
+                    Field addressField = clazz.getDeclaredField("address");
+                    addressField.setAccessible(true);
+                    Object addr = addressField.get(texObj);
+                    if (addr instanceof Long) {
+                        long h = (Long) addr;
+                        if (h > 0) {
+                            LOGGER.info("Extracted {} handle {} via MemorySegment.address field", textureType, h);
+                            return h;
+                        }
+                    }
+                } catch (NoSuchFieldException ignored) {}
+            }
+        }
 
         // 尝试常见字段名
         String[] fieldNames = {"handle", "textureHandle", "metalTextureHandle", "nativeHandle", "pointer", "ptr", "address", "texture"};
@@ -272,8 +303,10 @@ public final class MetalBridge {
                         LOGGER.info("Extracted {} handle {} from field {}", textureType, h, name);
                         return h;
                     }
-                } else {
-                    LOGGER.debug("Field {} is of type {} not a number", name, value != null ? value.getClass().getName() : "null");
+                } else if (value != null && value.getClass().getName().contains("MemorySegment")) {
+                    // 递归处理 MemorySegment
+                    long h = extractMetalHandle(value, textureType + "(nested)");
+                    if (h > 0) return h;
                 }
             } catch (NoSuchFieldException ignored) {
             } catch (Exception e) {
@@ -281,7 +314,7 @@ public final class MetalBridge {
             }
         }
 
-        // 如果没有找到，打印所有字段帮助诊断
+        // 如果没有找到，打印所有字段帮助诊断（但只打印一次）
         LOGGER.warn("Could not extract {} handle from {}. Fields:", textureType, clazz.getName());
         for (Field f : clazz.getDeclaredFields()) {
             f.setAccessible(true);
