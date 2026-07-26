@@ -1,6 +1,6 @@
 # codemagic.yaml
 # CI configuration for building MetallumShaders on CodeMagic.
-# Built for macOS ARM64 (Apple Silicon).
+# Built for iOS ARM64 (TrollStore / iPad) using iOS SDK.
 # Minecraft 26.2 / Java 25 / Gradle 9.6.1 / Fabric Loom 1.17.17 (Kotlin DSL)
 # Loom 默认从 Mojang 下载 MC 26.2（Mojang 官方映射，无混淆）
 
@@ -100,27 +100,37 @@ workflows:
           fi
           chmod +x ./gradlew
 
-      - name: Build native Metal JNI shim (ARM64)
+      - name: Build native Metal JNI shim (iOS ARM64)
         script: |
           #!/usr/bin/env bash
           set -e
           export JAVA_HOME=${JAVA_HOME:-/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home}
-          echo "Building native Metal JNI shim for ARM64"
-          mkdir -p build/native/macos-arm64
+          echo "Building native Metal JNI shim for iOS ARM64"
+          
+          mkdir -p build/native/ios-arm64
           SRC=src/main/cpp/metallum_shaders.cpp
-          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          
+          # 使用 iOS SDK 编译，目标 iOS 15.0+
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang++ -x objective-c++ -std=c++17 -stdlib=libc++ -fobjc-arc \
             -arch arm64 -dynamiclib \
-            -I"$SDK/System/Library/Frameworks/Metal.framework/Headers" \
-            -I"$SDK/System/Library/Frameworks/Foundation.framework/Headers" \
+            -target arm64-apple-ios15.0 \
+            -isysroot "$SDK" \
             -I"$JAVA_HOME/include" \
             -I"$JAVA_HOME/include/darwin" \
             -F"$SDK/System/Library/Frameworks" \
             -framework Metal -framework Foundation \
-            -o build/native/macos-arm64/libmetallum_shaders.dylib "$SRC"
+            -o build/native/ios-arm64/libmetallum_shaders.dylib "$SRC"
+          
+          # 复制到资源目录（ios-arm64）
+          mkdir -p src/main/resources/native/ios-arm64
+          cp build/native/ios-arm64/libmetallum_shaders.dylib src/main/resources/native/ios-arm64/
+          
+          # 为兼容开发环境，也复制一份到 osx-arm64（但实际是 iOS 库，仅用于测试）
           mkdir -p src/main/resources/native/osx-arm64
-          cp build/native/macos-arm64/libmetallum_shaders.dylib src/main/resources/native/osx-arm64/
-          echo "Native arm64 dylib built and bundled."
+          cp build/native/ios-arm64/libmetallum_shaders.dylib src/main/resources/native/osx-arm64/
+          
+          echo "Native iOS arm64 dylib built and bundled."
 
       - name: Build mod jar
         script: |
