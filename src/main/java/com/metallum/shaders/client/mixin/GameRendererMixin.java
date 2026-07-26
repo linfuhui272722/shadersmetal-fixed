@@ -19,16 +19,9 @@ import java.nio.ByteOrder;
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
 
-    // 缓存 Minecraft.camera 字段，运行时反射获取
+    // 懒加载缓存，避免类加载时崩溃
     private static Field cameraField;
-    static {
-        try {
-            cameraField = Minecraft.class.getDeclaredField("camera");
-            cameraField.setAccessible(true);
-        } catch (NoSuchFieldException e) {
-            System.err.println("[MetallumShaders] Failed to find camera field in Minecraft: " + e.getMessage());
-        }
-    }
+    private static boolean cameraFieldInitialized = false;
 
     /**
      * 核心渲染注入点。
@@ -71,7 +64,7 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // ★ 通过反射获取 Camera
+        // ★ 通过懒加载反射获取 Camera
         Camera camera = getCamera();
         if (camera != null) {
             uniformData.putFloat((float) camera.position().x);
@@ -107,9 +100,32 @@ public abstract class GameRendererMixin {
     }
 
     /**
-     * 通过反射从 Minecraft 获取 Camera 对象
+     * 懒加载反射获取 Minecraft.camera 字段
      */
     private Camera getCamera() {
+        if (!cameraFieldInitialized) {
+            synchronized (GameRendererMixin.class) {
+                if (!cameraFieldInitialized) {
+                    try {
+                        // 尝试通过反射获取 Minecraft.camera 字段
+                        cameraField = Minecraft.class.getDeclaredField("camera");
+                        cameraField.setAccessible(true);
+                    } catch (NoSuchFieldException e) {
+                        System.err.println("[MetallumShaders] Failed to find camera field in Minecraft: " + e.getMessage());
+                        // 可尝试备选字段名
+                        try {
+                            cameraField = Minecraft.class.getDeclaredField("field_175622"); // 中间映射备选
+                            cameraField.setAccessible(true);
+                            System.err.println("[MetallumShaders] Found field via fallback name 'field_175622'");
+                        } catch (NoSuchFieldException ex) {
+                            System.err.println("[MetallumShaders] Fallback failed too: " + ex.getMessage());
+                        }
+                    }
+                    cameraFieldInitialized = true;
+                }
+            }
+        }
+
         if (cameraField == null) {
             return null;
         }
