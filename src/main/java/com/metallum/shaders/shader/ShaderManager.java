@@ -16,19 +16,6 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * Loads the bundled {@code .metal} sources, compiles them through
- * Metallum's {@code MTLDevice}, and caches the resulting pipeline state
- * objects keyed by pass name.
- *
- * <p>Passes:
- * <ul>
- *   <li>{@code composite} — deferred lighting + volumetric fog + moving lights</li>
- *   <li>{@code bloom_h} — horizontal separable bloom</li>
- *   <li>{@code bloom_v} — vertical separable bloom</li>
- *   <li>{@code tonemap} — ACES tone map + saturation + vignette</li>
- * </ul>
- */
 public final class ShaderManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/Shader");
@@ -157,7 +144,7 @@ public final class ShaderManager {
 
     /**
      * Loads a shader source file and recursively resolves #include directives.
-     * Includes are searched in the "include/" subdirectory relative to SHADER_DIR.
+     * Includes are searched using the path exactly as written in the source.
      * To prevent infinite recursion, a set of already included paths is maintained.
      *
      * @param path the path to the shader file (e.g. "core/fullscreen_vertex.metal")
@@ -181,21 +168,21 @@ public final class ShaderManager {
                 int end = trimmed.lastIndexOf('"');
                 if (start > 0 && end > start) {
                     String includeFile = trimmed.substring(start, end);
-                    // Assume includes are in the "include/" subdirectory
-                    String includePath = "include/" + includeFile;
-                    // Avoid infinite recursion
+                    // 直接使用源文件中写的路径（可能已经包含 "include/" 前缀）
+                    String includePath = includeFile;
+                    // 避免无限递归
                     if (processed.contains(includePath)) {
                         LOGGER.warn("Recursive include detected, skipping: {}", includePath);
                         continue;
                     }
                     processed.add(includePath);
                     String includeContent = loadSourceWithIncludes(includePath, processed);
-                    processed.remove(includePath); // allow reuse in other contexts
+                    processed.remove(includePath);
                     result.append(includeContent);
-                    // Add a newline after include to keep formatting
+                    // 添加一个换行保持格式
                     result.append("\n");
                 } else {
-                    // Malformed include, keep the line as-is
+                    // 格式错误的 include，保留原行
                     result.append(line).append("\n");
                 }
             } else {
