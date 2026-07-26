@@ -1,87 +1,74 @@
 package com.metallum.shaders.jni;
 
-import com.metallum.shaders.MetallumShadersMod;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * Loads the small JNI shim library ({@code libmetallum_shaders.dylib} on
- * macOS) that actually issues Metal {@code MTLRenderCommandEncoder} calls.
- *
- * <p>The shim is intentionally tiny — it only knows how to:
- * <ol>
- *   <li>compile a Metallum-bundled {@code .metal} source into a
- *       {@code id&lt;MTLLibrary&gt;} via {@code MTLDevice.newLibraryWithSource},</li>
- *   <li>build a {@code MTLRenderPipelineState} for a vertex+fragment pair,</li>
- *   <li>issue a fullscreen triangle draw with that pipeline bound to the
- *       g-buffer color/depth textures that Metallum exposes.</li>
- * </ol>
- *
- * <p>If the native library cannot be loaded (e.g. running on non-macOS or
- * without Metallum), all native methods become no-ops and the mod logs a
- * warning instead of crashing.
+ * Loads the native {@code libmetallum_shaders.dylib} from the JAR's
+ * native/ios-arm64/ folder, extracts it to a temporary location, and
+ * loads it with {@link System#load(String)}.
  */
 public final class NativeLoader {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/Native");
-
+    private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/NativeLoader");
     private static volatile boolean loaded = false;
-    private static volatile boolean attempted = false;
 
     private NativeLoader() {}
 
+    /**
+     * Ensure the native library is loaded. Safe to call multiple times.
+     * @return true if the library was successfully loaded, false otherwise.
+     */
     public static synchronized boolean ensureLoaded() {
-        if (attempted) return loaded;
-        attempted = true;
-
-        String osName = System.getProperty("os.name", "").toLowerCase();
-        if (!osName.contains("mac")) {
-            LOGGER.warn("Metallum shaders require macOS (Metal). Detected: {}. "
-                    + "Shaders will be disabled.", osName);
-            return false;
-        }
-
-        // Try system load first (in case the user installed the lib globally)
+        if (loaded) return true;
         try {
-            System.loadLibrary("metallum_shaders");
-            loaded = true;
-            LOGGER.info("Loaded libmetallum_shaders from java.library.path");
-            return true;
-        } catch (UnsatisfiedLinkError ignored) {}
+            // Determine the library name for the current platform.
+            // iOS arm64 uses "ios-arm64" subfolder.
+            String os = System.getProperty("os.name").toLowerCase();
+            String arch = System.getProperty("os.arch").toLowerCase();
+            String libName = "libmetallum_shaders.dylib";
+            String platformPath;
 
-        // Otherwise extract the bundled dylib from the jar
-        String arch = System.getProperty("os.arch", "");
-        String archDir = arch.contains("aarch64") || arch.contains("arm64")
-                ? "arm64" : "x86_64";
-        String resourcePath = "/native/macos-" + archDir + "/libmetallum_shaders.dylib";
-
-        try (InputStream in = NativeLoader.class.getResourceAsStream(resourcePath)) {
-            if (in == null) {
-                LOGGER.warn("Bundled native library not found at {} — shaders disabled. "
-                        + "Build the native component with `./gradlew buildNative`.", resourcePath);
-                return false;
+            // Detect iOS environment (TrollStore usually has 'iPhone' or 'iPad' in os.name)
+            if (os.contains("ios") || os.contains("iphone") || os.contains("ipad") || os.contains("darwin")) {
+                if (arch.contains("aarch64") || arch.contains("arm64")) {
+                    platformPath = "native/ios-arm64/" + libName;
+                } else {
+                    LOGGER.warn("Unsupported iOS architecture: {}", arch);
+                    return false;
+                }
+            } else {
+                // Fallback to "native/osx-arm64" for Mac development (if needed)
+                platformPath = "native/osx-arm64/" + libName;
             }
-            Path tmp = Files.createTempFile("libmetallum_shaders", ".dylib");
-            tmp.toFile().deleteOnExit();
-            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
-            System.load(tmp.toAbsolutePath().toString());
+
+            // Extract the library from the JAR
+            Path tempDir = Files.createTempDirectory("metallum_");
+            Path targetPath = tempDir.resolve(libName);
+            try (InputStream in = NativeLoader.class.getResourceAsStream("/" + platformPath)) {
+                if (in == null) {
+                    LOGGER.error("Native library not found in JAR: /{}", platformPath);
+                    return false;
+                }
+                Files.copy(in, targetPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            // Set executable permission (on iOS, not strictly needed but safe)
+            targetPath.toFile().setExecutable(true);
+
+            // Load the library
+            System.load(targetPath.toAbsolutePath().toString());
             loaded = true;
-            LOGGER.info("Extracted and loaded bundled libmetallum_shaders from {}", tmp);
+            LOGGER.info("Loaded native library from {}", targetPath);
             return true;
-        } catch (IOException | UnsatisfiedLinkError e) {
-            LOGGER.warn("Failed to load native shim", e);
+        } catch (Throwable t) {
+            LOGGER.error("Failed to load native library", t);
             return false;
         }
-    }
-
-    public static boolean isLoaded() {
-        return loaded;
     }
 }
-
