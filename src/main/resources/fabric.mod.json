@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "metallum_shaders",
+  "version": "${version}",
+  "name": "Metallum Shaders",
+  "description": "MakeUp-UltraFast-style shaders for Minecraft Java 26.2 running on the Metallum Metal backend. No Iris, no OptiFine, no GLSL — pure Metal Shading Language.",
+  "authors": [
+    "MetallumShaders Contributors"
+  ],
+  "contact": {
+    "homepage": "https://github.com/EternityQwQ/MetalUniversal",
+    "sources": "https://github.com/EternityQwQ/MetalUniversal",
+    "issues": "https://github.com/EternityQwQ/MetalUniversal/issues"
+  },
+  "license": "MIT",
+  "icon": "assets/metallum_shaders/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.metallum.shaders.client.MetallumShadersClient"
+    ],
+    "main": [
+      "com.metallum.shaders.MetallumShadersMod"
+    ]
+  },
+  "mixins": [
+    "metallum_shaders.mixins.json",
+    {
+      "config": "metallum_shaders.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "accessWidener": "metallum.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.16.14",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*",
+    "metallum": "*"
+  },
+  "breaks": {
+    "iris": "*",
+    "oculus": "*",
+    "optifabric": "*",
+    "optifine": "*"
+  },
+  "conflicts": {
+    "rubidium": "*"
+  },
+  "recommends": {
+    "sodium": "*"
+  },
+  "custom": {
+    "modmenu": {
+      "links": {
+        "modmenu.discord": "https://discord.gg/metallum"
+      }
+    }
+  }
+}

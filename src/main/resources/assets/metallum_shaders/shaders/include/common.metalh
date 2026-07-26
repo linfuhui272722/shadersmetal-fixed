@@ -1,0 +1,64 @@
+#ifndef METALLUM_COMMON_METALH
+#define METALLUM_COMMON_METALH
+
+#include <metal_stdlib>
+#include "include/uniforms.metalh"
+using namespace metal;
+
+// Reconstruct world-space position from a depth sample and the inverse
+// view-projection matrix. This is the standard "deferred world rebuild"
+// used by MakeUp-UltraFast and most modern shaderpacks.
+inline float3 worldPosFromDepth(float2 uv, float depth, float4x4 invViewProj) {
+    float4 clip = float4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+    float4 world = invViewProj * clip;
+    return world.xyz / world.w;
+}
+
+// ACES filmic tone map — same curve MakeUp-UltraFast uses.
+inline float3 acesTonemap(float3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Cheap hash for dithering — breaks up banding in the fog and bloom.
+inline float hash12(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Smooth noise for torch flicker.
+inline float noise1D(float t) {
+    float i = floor(t);
+    float f = fract(t);
+    float u = f * f * (3.0 - 2.0 * f);
+    return mix(hash12(float2(i, 0.0)),
+               hash12(float2(i + 1.0, 0.0)), u);
+}
+
+// Lambert + a soft wrap term, used for the moving lights so they look
+// like point lights with a soft falloff rather than hard-edged spots.
+inline float wrapLight(float3 N, float3 L, float wrap) {
+    return max(0.0, (dot(N, L) + wrap) / (1.0 + wrap));
+}
+
+// Inverse-square attenuation with a soft cutoff at the radius boundary.
+inline float lightAttenuation(float3 worldPos, float3 lightPos, float radius) {
+    float d = distance(worldPos, lightPos);
+    float att = 1.0 / (1.0 + d * d * 0.25);
+    float cutoff = smoothstep(radius, radius * 0.5, d);
+    return att * cutoff;
+}
+
+// Vignette mask — darker at the screen edges, like MakeUp-UltraFast.
+inline float vignette(float2 uv, float strength) {
+    float2 d = uv - 0.5;
+    float v = 1.0 - dot(d, d) * strength;
+    return clamp(v, 0.0, 1.0);
+}
+
+#endif

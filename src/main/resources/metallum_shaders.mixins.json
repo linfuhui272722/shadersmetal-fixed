@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.metallum.shaders.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "refmap": "metallum_shaders.refmap.json",
+  "mixins": [],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

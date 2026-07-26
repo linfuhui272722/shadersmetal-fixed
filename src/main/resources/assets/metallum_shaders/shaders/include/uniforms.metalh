@@ -1,0 +1,37 @@
+#ifndef METALLUM_UNIFORMS_METALH
+#define METALLUM_UNIFORMS_METALH
+
+#include <metal_stdlib>
+using namespace metal;
+
+// Maximum number of dynamic (moving) light sources.
+// Must match LightSourceManager.MAX_LIGHTS on the Java side.
+constant int MAX_LIGHTS = 16;
+
+struct Light {
+    float4 positionAndRadius;   // xyz = world pos, w = radius
+    float4 colorAndIntensity;   // rgb = color, a = intensity
+};
+
+struct Uniforms {
+    float4x4 viewProj;
+    float4x4 invViewProj;
+    float4   cameraPos;     // xyz, w unused
+    float4   sunDir;        // xyz, w unused
+    float4   sunColor;      // rgb,  a unused
+    float4   moonDir;       // xyz,  w unused
+    float4   moonColor;     // rgb,  a unused
+    float4   timePack;      // time, frameTime, exposure, saturation
+    float4   fogPack;       // fogDensity, fogFalloff, skyFogBlend, bloomStrength
+    float4   bloomPack;     // bloomThreshold, vignetteStrength, renderScale, pad
+    float4   resolution;    // xy = resolution, z = lightCount, w = pad
+    Light    lights[MAX_LIGHTS];
+};
+
+// Vertex output for the fullscreen triangle.
+struct VSOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+#endif

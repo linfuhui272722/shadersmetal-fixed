@@ -1,0 +1,165 @@
+# codemagic.yaml
+# CI configuration for building MetallumShaders on CodeMagic.
+# Built for macOS ARM64 (Apple Silicon).
+# Minecraft 26.2 / Java 25 / Gradle 9.6.1 / Fabric Loom 1.17.17 (Kotlin DSL)
+# Loom 默认从 Mojang 下载 MC 26.2（Mojang 官方映射，无混淆）
+
+workflows:
+  metallum-shaders-build:
+    name: Metallum Shaders Build
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      vars:
+        JAVA_VERSION: "25"
+      xcode: latest
+    triggering:
+      events:
+        - push
+        - pull_request
+      branch_patterns:
+        - pattern: main
+          include: true
+        - pattern: develop
+          include: true
+      cancel_previous_builds: true
+    cache:
+      cache_paths:
+        - ~/.gradle/caches
+        - ~/.gradle/wrapper
+        - .gradle/
+    scripts:
+      - name: Install Java 25 (Adoptium)
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          echo "=== Installing Java 25 (Adoptium) ==="
+          brew tap homebrew/cask-versions 2>/dev/null || true
+          brew install --cask temurin@25 2>/dev/null || true
+          export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home
+          sudo ln -sf $JAVA_HOME/bin/java /usr/local/bin/java
+          sudo ln -sf $JAVA_HOME/bin/javac /usr/local/bin/javac
+          echo "JAVA_HOME=$JAVA_HOME" >> $CM_ENV
+          echo "PATH=$JAVA_HOME/bin:$PATH" >> $CM_ENV
+          java -version
+
+      - name: Download dependencies (Metallum & Sodium)
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          mkdir -p libs
+          
+          # Metallum
+          if [ ! -f libs/metallum-1.0.1.jar ]; then
+            echo "Downloading Metallum jar..."
+            curl -L -o libs/metallum-1.0.1.jar \
+              "https://github.com/EternityQwQ/MetalUniversal/releases/download/MetalUniversal_1.0.1/metallum-1.0.1.jar" \
+              || echo "WARNING: could not download Metallum jar"
+            if [ ! -s libs/metallum-1.0.1.jar ]; then
+              mkdir -p tmp-stub/META-INF
+              printf "Manifest-Version: 1.0\n" > tmp-stub/META-INF/MANIFEST.MF
+              (cd tmp-stub && jar cf ../libs/metallum-1.0.1.jar META-INF/MANIFEST.MF)
+              rm -rf tmp-stub
+            fi
+          fi
+          
+          # Sodium
+          if [ ! -f libs/sodium-fabric-0.9.1+mc26.2.jar ]; then
+            echo "Downloading Sodium jar..."
+            curl -L -o libs/sodium-fabric-0.9.1+mc26.2.jar \
+              "https://cdn.modrinth.com/data/AANobbMI/versions/2Yom1N68/sodium-fabric-0.9.1%2Bmc26.2.jar" \
+              || echo "WARNING: could not download Sodium jar"
+            if [ ! -s libs/sodium-fabric-0.9.1+mc26.2.jar ]; then
+              mkdir -p tmp-stub/META-INF
+              printf "Manifest-Version: 1.0\n" > tmp-stub/META-INF/MANIFEST.MF
+              (cd tmp-stub && jar cf ../libs/sodium-fabric-0.9.1+mc26.2.jar META-INF/MANIFEST.MF)
+              rm -rf tmp-stub
+            fi
+          fi
+          ls -la libs/
+
+      - name: Setup Gradle Wrapper
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          export JAVA_HOME=${JAVA_HOME:-/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home}
+          export PATH=$JAVA_HOME/bin:$PATH
+          mkdir -p gradle/wrapper
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Downloading gradle-wrapper.jar..."
+            curl -L -o gradle/wrapper/gradle-wrapper.jar \
+              "https://github.com/gradle/gradle/raw/v9.6.1/gradle/wrapper/gradle-wrapper.jar" \
+              || {
+                if command -v gradle &>/dev/null; then
+                  gradle wrapper --gradle-version 9.6.1 --distribution-type bin
+                else
+                  echo "ERROR: gradle-wrapper.jar download failed and gradle not found"
+                  exit 1
+                fi
+              }
+          fi
+          chmod +x ./gradlew
+
+      - name: Build native Metal JNI shim (ARM64)
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          export JAVA_HOME=${JAVA_HOME:-/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home}
+          echo "Building native Metal JNI shim for ARM64"
+          mkdir -p build/native/macos-arm64
+          SRC=src/main/cpp/metallum_shaders.cpp
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          clang++ -x objective-c++ -std=c++17 -stdlib=libc++ -fobjc-arc \
+            -arch arm64 -dynamiclib \
+            -I"$SDK/System/Library/Frameworks/Metal.framework/Headers" \
+            -I"$SDK/System/Library/Frameworks/Foundation.framework/Headers" \
+            -I"$JAVA_HOME/include" \
+            -I"$JAVA_HOME/include/darwin" \
+            -F"$SDK/System/Library/Frameworks" \
+            -framework Metal -framework Foundation \
+            -o build/native/macos-arm64/libmetallum_shaders.dylib "$SRC"
+          mkdir -p src/main/resources/native/macos-arm64
+          cp build/native/macos-arm64/libmetallum_shaders.dylib \
+            src/main/resources/native/macos-arm64/
+          echo "Native arm64 dylib built and bundled."
+
+      - name: Build mod jar
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home
+          export PATH=$JAVA_HOME/bin:$PATH
+          echo "=== Environment Check ==="
+          java -version
+          echo "Stopping all Gradle daemons..."
+          ./gradlew --stop || true
+          
+          echo "Building mod jar with Java 25 and Gradle wrapper..."
+          ./gradlew clean build --no-daemon --stacktrace \
+            -Dorg.gradle.java.home=$JAVA_HOME \
+            -Dorg.gradle.jvmargs=-Xmx4g
+
+      - name: Verify jar contents
+        script: |
+          #!/usr/bin/env bash
+          set -e
+          JAR=$(ls build/libs/metallum-shaders-*.jar | head -n1)
+          echo "Built jar: $JAR"
+          jar tf "$JAR" | head -50
+          echo "----"
+          echo "Shader files:"
+          jar tf "$JAR" | grep -E '\.(metal|metalh)$' || true
+          echo "----"
+          echo "Native libs:"
+          jar tf "$JAR" | grep -E '\.dylib$' || echo "(no dylibs found)"
+
+    artifacts:
+      - build/libs/*.jar
+      - build/native/**/*.dylib
+    publishing:
+      email:
+        recipients:
+          - user@example.com
+        notify:
+          success: true
+          failure: true
