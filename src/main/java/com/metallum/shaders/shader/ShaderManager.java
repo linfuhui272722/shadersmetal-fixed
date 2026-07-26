@@ -12,7 +12,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Loads the bundled {@code .metal} sources, compiles them through
@@ -63,11 +65,12 @@ public final class ShaderManager {
         // Concatenate the include header + main source so the compiler
         // sees the shared structs / uniforms in one translation unit.
         // We bundle the vertex shader once, then each fragment pass.
-        String source = loadSource("core/fullscreen_vertex.metal")
-                + "\n// === composite ===\n" + loadSource("core/composite_fragment.metal")
-                + "\n// === bloom_h ===\n"  + loadSource("post/bloom_horizontal_fragment.metal")
-                + "\n// === bloom_v ===\n"  + loadSource("post/bloom_vertical_fragment.metal")
-                + "\n// === tonemap ===\n"  + loadSource("post/tonemap_fragment.metal");
+        // Use loadSourceWithIncludes to recursively handle #include directives.
+        String source = loadSourceWithIncludes("core/fullscreen_vertex.metal")
+                + "\n// === composite ===\n" + loadSourceWithIncludes("core/composite_fragment.metal")
+                + "\n// === bloom_h ===\n"  + loadSourceWithIncludes("post/bloom_horizontal_fragment.metal")
+                + "\n// === bloom_v ===\n"  + loadSourceWithIncludes("post/bloom_vertical_fragment.metal")
+                + "\n// === tonemap ===\n"  + loadSourceWithIncludes("post/tonemap_fragment.metal");
 
         libraryHandle = MetalNative.compileLibrary(device, source, "metallum_shaders.metal");
         if (libraryHandle == 0L) {
@@ -150,5 +153,55 @@ public final class ShaderManager {
             LOGGER.error("Failed to read shader source: {}", path, e);
             return "";
         }
+    }
+
+    /**
+     * Loads a shader source file and recursively resolves #include directives.
+     * Includes are searched in the "include/" subdirectory relative to SHADER_DIR.
+     * To prevent infinite recursion, a set of already included paths is maintained.
+     *
+     * @param path the path to the shader file (e.g. "core/fullscreen_vertex.metal")
+     * @return the source code with all #include directives replaced by the included file content
+     */
+    private static String loadSourceWithIncludes(String path) {
+        return loadSourceWithIncludes(path, new HashSet<>());
+    }
+
+    private static String loadSourceWithIncludes(String path, Set<String> processed) {
+        String content = loadSource(path);
+        if (content.isEmpty()) {
+            return content;
+        }
+        StringBuilder result = new StringBuilder();
+        String[] lines = content.split("\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("#include \"")) {
+                int start = trimmed.indexOf('"') + 1;
+                int end = trimmed.lastIndexOf('"');
+                if (start > 0 && end > start) {
+                    String includeFile = trimmed.substring(start, end);
+                    // Assume includes are in the "include/" subdirectory
+                    String includePath = "include/" + includeFile;
+                    // Avoid infinite recursion
+                    if (processed.contains(includePath)) {
+                        LOGGER.warn("Recursive include detected, skipping: {}", includePath);
+                        continue;
+                    }
+                    processed.add(includePath);
+                    String includeContent = loadSourceWithIncludes(includePath, processed);
+                    processed.remove(includePath); // allow reuse in other contexts
+                    result.append(includeContent);
+                    // Add a newline after include to keep formatting
+                    result.append("\n");
+                } else {
+                    // Malformed include, keep the line as-is
+                    result.append(line).append("\n");
+                }
+            } else {
+                result.append(line).append("\n");
+            }
+        }
+        return result.toString();
     }
 }
