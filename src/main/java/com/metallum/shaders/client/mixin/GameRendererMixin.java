@@ -12,11 +12,23 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
+
+    // 缓存 Minecraft.camera 字段，运行时反射获取
+    private static Field cameraField;
+    static {
+        try {
+            cameraField = Minecraft.class.getDeclaredField("camera");
+            cameraField.setAccessible(true);
+        } catch (NoSuchFieldException e) {
+            System.err.println("[MetallumShaders] Failed to find camera field in Minecraft: " + e.getMessage());
+        }
+    }
 
     /**
      * 核心渲染注入点。
@@ -59,8 +71,8 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // ★ 正确方式：从 Minecraft 实例获取 Camera（public 字段）
-        Camera camera = Minecraft.getInstance().camera;
+        // ★ 通过反射获取 Camera
+        Camera camera = getCamera();
         if (camera != null) {
             uniformData.putFloat((float) camera.position().x);
             uniformData.putFloat((float) camera.position().y);
@@ -91,6 +103,21 @@ public abstract class GameRendererMixin {
         
         if (result != 0) {
              System.err.println("[MetallumShaders] dispatchFullscreen failed with code: " + result);
+        }
+    }
+
+    /**
+     * 通过反射从 Minecraft 获取 Camera 对象
+     */
+    private Camera getCamera() {
+        if (cameraField == null) {
+            return null;
+        }
+        try {
+            return (Camera) cameraField.get(Minecraft.getInstance());
+        } catch (IllegalAccessException e) {
+            System.err.println("[MetallumShaders] Failed to get camera via reflection: " + e.getMessage());
+            return null;
         }
     }
 
