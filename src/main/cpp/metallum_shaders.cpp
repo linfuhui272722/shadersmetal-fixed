@@ -61,7 +61,7 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
     NSString* name   = [NSString stringWithUTF8String:nm];
 
     MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-    opts.languageVersion = MTLLanguageVersion2_3;
+    opts.languageVersion = MTLLanguageVersion2_3;  // iOS 15.5 supports up to 2.3
 
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:source
@@ -91,9 +91,17 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     jstring vertexNameJ, jstring fragmentNameJ,
     jint colorFormat, jint depthFormat) {
 
+    // === 关键日志：打印接收到的所有参数，用于调试 ===
+    NSLog(@"[MetallumShaders] buildPostPipeline: device=0x%llx, library=0x%llx",
+          (unsigned long long)deviceHandle, (unsigned long long)libraryHandle);
+    NSLog(@"[MetallumShaders]   colorFormat=%d, depthFormat=%d", (int)colorFormat, (int)depthFormat);
+
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
     id<MTLLibrary> lib   = (__bridge id<MTLLibrary>)(void*) libraryHandle;
-    if (!device || !lib) return 0;
+    if (!device || !lib) {
+        NSLog(@"[MetallumShaders]   Invalid device or library");
+        return 0;
+    }
 
     const char* vn = env->GetStringUTFChars(vertexNameJ, nullptr);
     const char* fn = env->GetStringUTFChars(fragmentNameJ, nullptr);
@@ -121,6 +129,8 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
         [device newRenderPipelineStateWithDescriptor:desc error:&err];
     if (err) {
         NSLog(@"[MetallumShaders] Pipeline build failed: %@", err);
+    } else {
+        NSLog(@"[MetallumShaders] Pipeline built successfully");
     }
 
     env->ReleaseStringUTFChars(vertexNameJ, vn);
