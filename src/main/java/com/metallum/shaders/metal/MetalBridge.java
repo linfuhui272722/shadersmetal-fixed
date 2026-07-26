@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Optional;
 
 public final class MetalBridge {
@@ -69,12 +70,11 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 纹理获取 - 通过反射从 Minecraft 的 RenderTarget 中获取
+    // 纹理获取 - 从 Minecraft 的 RenderTarget 中获取
     // =====================================================================
 
     /**
-     * 获取主颜色纹理句柄
-     * 对应 Yarn: MinecraftClient.getFramebuffer() -> Mojang: Minecraft.mainRenderTarget
+     * 获取主颜色纹理句柄（从 Minecraft 的 RenderTarget 中获取）
      */
     public static long getMainColorTextureHandle() {
         if (!isAvailable()) return -1L;
@@ -125,6 +125,7 @@ public final class MetalBridge {
     }
 
     public static Optional<Long> getMainNormalTextureHandle() {
+        // 大多数 Minecraft 渲染目标没有法线纹理，返回空
         return Optional.empty();
     }
 
@@ -151,22 +152,39 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 反射辅助方法
+    // 反射辅助方法 - 带调试输出
     // =====================================================================
 
     private static RenderTarget getRenderTarget() throws Exception {
         if (renderTargetField == null) {
+            // ★ 调试：打印所有 RenderTarget 类型的字段
+            Field[] fields = Minecraft.class.getDeclaredFields();
+            System.err.println("[MetallumShaders] Debug: Scanning Minecraft fields for RenderTarget type:");
+            for (Field f : fields) {
+                if (RenderTarget.class.isAssignableFrom(f.getType())) {
+                    System.err.println("[MetallumShaders]   Found RenderTarget field: " + f.getName());
+                }
+            }
+            
             // 尝试多个可能的字段名
-            String[] names = {"mainRenderTarget", "framebuffer", "frameBuffer", "fbo"};
+            String[] names = {
+                "framebuffer", "frameBuffer", 
+                "mainRenderTarget", "renderTarget",
+                "fbo", "fb",
+                "field_175622" // Mojang 中间映射备选
+            };
             for (String name : names) {
                 try {
                     renderTargetField = Minecraft.class.getDeclaredField(name);
                     renderTargetField.setAccessible(true);
+                    System.err.println("[MetallumShaders] Successfully found RenderTarget field: " + name);
                     break;
-                } catch (NoSuchFieldException ignored) {}
+                } catch (NoSuchFieldException ignored) {
+                    System.err.println("[MetallumShaders] Field not found: " + name);
+                }
             }
             if (renderTargetField == null) {
-                LOGGER.warn("Cannot find RenderTarget field in Minecraft");
+                System.err.println("[MetallumShaders] Cannot find RenderTarget field in Minecraft");
                 return null;
             }
         }
@@ -175,21 +193,27 @@ public final class MetalBridge {
 
     private static int getRenderTargetColorTextureId(RenderTarget target) throws Exception {
         if (colorTextureIdField == null) {
-            String[] names = {"colorTextureId", "frameBufferId", "fbo"};
+            // 尝试多个可能的字段名
+            String[] names = {
+                "colorTexture", "colorTextureId", "frameBufferId", 
+                "fbo", "fbId",
+                "field_175623"
+            };
             for (String name : names) {
                 try {
                     colorTextureIdField = RenderTarget.class.getDeclaredField(name);
                     colorTextureIdField.setAccessible(true);
+                    System.err.println("[MetallumShaders] Found color texture field: " + name);
                     break;
                 } catch (NoSuchFieldException ignored) {}
             }
             if (colorTextureIdField == null) {
                 // 尝试通过 getColorTextureId() 方法获取
                 try {
-                    java.lang.reflect.Method m = RenderTarget.class.getMethod("getColorTextureId");
+                    Method m = RenderTarget.class.getMethod("getColorTextureId");
                     return (int) m.invoke(target);
                 } catch (NoSuchMethodException e) {
-                    LOGGER.warn("Cannot find color texture field/method in RenderTarget");
+                    System.err.println("[MetallumShaders] Cannot find color texture field/method");
                     return -1;
                 }
             }
@@ -199,11 +223,15 @@ public final class MetalBridge {
 
     private static int getRenderTargetDepthTextureId(RenderTarget target) throws Exception {
         if (depthTextureIdField == null) {
-            String[] names = {"depthTextureId", "depthBufferId"};
+            String[] names = {
+                "depthTexture", "depthTextureId", "depthBufferId",
+                "field_175624"
+            };
             for (String name : names) {
                 try {
                     depthTextureIdField = RenderTarget.class.getDeclaredField(name);
                     depthTextureIdField.setAccessible(true);
+                    System.err.println("[MetallumShaders] Found depth texture field: " + name);
                     break;
                 } catch (NoSuchFieldException ignored) {}
             }
