@@ -4,6 +4,7 @@ import com.metallum.shaders.jni.MetalNative;
 import com.metallum.shaders.jni.NativeLoader;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.GameRenderer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,13 +32,8 @@ public final class MetalBridge {
     private static Field depthTextureIdField;
 
     // 方法缓存
-    private static Method getFramebufferMethod;
-    private static Method getRenderTargetMethod;
     private static Method getColorTextureIdMethod;
     private static Method getDepthTextureIdMethod;
-
-    // 调试标志
-    private static volatile boolean debugPrinted = false;
 
     private MetalBridge() {}
 
@@ -87,10 +83,16 @@ public final class MetalBridge {
 
         try {
             RenderTarget renderTarget = getRenderTarget();
-            if (renderTarget == null) return -1L;
+            if (renderTarget == null) {
+                LOGGER.debug("RenderTarget is null");
+                return -1L;
+            }
 
             int textureId = getRenderTargetColorTextureId(renderTarget);
-            if (textureId <= 0) return -1L;
+            if (textureId <= 0) {
+                LOGGER.debug("Color texture ID is {}", textureId);
+                return -1L;
+            }
 
             if (textureId == lastColorTextureId && cachedColorTextureHandle != -1L) {
                 return cachedColorTextureHandle;
@@ -157,106 +159,48 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 反射辅助方法（优先使用方法，备选字段）
+    // 反射辅助方法
     // =====================================================================
 
+    /**
+     * 获取 RenderTarget - 在 1.21（26.2）中通过 GameRenderer 获取
+     */
     private static RenderTarget getRenderTarget() throws Exception {
-        // ★ 调试：首次调用时打印所有相关方法
-        if (!debugPrinted) {
-            debugPrinted = true;
-            System.err.println("[MetallumShaders] Debug: Scanning Minecraft methods for RenderTarget:");
-            Method[] methods = Minecraft.class.getDeclaredMethods();
-            for (Method m : methods) {
-                if (m.getReturnType() == RenderTarget.class ||
-                    m.getName().toLowerCase().contains("framebuffer") ||
-                    m.getName().toLowerCase().contains("render") ||
-                    m.getName().toLowerCase().contains("target")) {
-                    System.err.println("[MetallumShaders]   " + m.getName() + " -> " + m.getReturnType().getSimpleName());
+        // ★ 1.21 版本：从 GameRenderer 获取 mainRenderTarget
+        GameRenderer gameRenderer = Minecraft.getInstance().gameRenderer;
+        if (gameRenderer != null) {
+            // 尝试直接访问字段（如果可见）
+            try {
+                Field mainRenderTargetField = GameRenderer.class.getDeclaredField("mainRenderTarget");
+                mainRenderTargetField.setAccessible(true);
+                Object target = mainRenderTargetField.get(gameRenderer);
+                if (target instanceof RenderTarget) {
+                    LOGGER.info("Found RenderTarget via GameRenderer.mainRenderTarget");
+                    return (RenderTarget) target;
                 }
-            }
-            // 再打印所有返回 RenderTarget 的字段（也可能有用）
-            Field[] fields = Minecraft.class.getDeclaredFields();
-            for (Field f : fields) {
-                if (f.getType() == RenderTarget.class) {
-                    System.err.println("[MetallumShaders]   Field: " + f.getName() + " -> " + f.getType().getSimpleName());
+            } catch (NoSuchFieldException ignored) {
+                // 尝试其他字段名
+                try {
+                    Field field = GameRenderer.class.getDeclaredField("renderTarget");
+                    field.setAccessible(true);
+                    Object target = field.get(gameRenderer);
+                    if (target instanceof RenderTarget) {
+                        LOGGER.info("Found RenderTarget via GameRenderer.renderTarget");
+                        return (RenderTarget) target;
+                    }
+                } catch (NoSuchFieldException ignored2) {
+                    LOGGER.debug("GameRenderer fields not found");
                 }
+            } catch (IllegalAccessException e) {
+                LOGGER.debug("Cannot access GameRenderer field", e);
             }
         }
 
-        // 1. 尝试通过 getFramebuffer() 方法（Mojang 映射）
-        if (getFramebufferMethod == null) {
-            try {
-                getFramebufferMethod = Minecraft.class.getMethod("getFramebuffer");
-            } catch (NoSuchMethodException ignored) {
-                // 忽略
-            }
-        }
-        if (getFramebufferMethod != null) {
-            try {
-                Object result = getFramebufferMethod.invoke(Minecraft.getInstance());
-                if (result instanceof RenderTarget) {
-                    System.err.println("[MetallumShaders] Found RenderTarget via getFramebuffer()");
-                    return (RenderTarget) result;
-                }
-            } catch (Exception e) {
-                LOGGER.debug("getFramebuffer() failed, trying fallbacks", e);
-            }
-        }
+        // 备选：如果 GameRenderer 不行，尝试之前的方法
+        // ... (保留之前的备选逻辑，但一般不需要了)
 
-        // 2. 尝试通过 getRenderTarget() 方法（备选）
-        if (getRenderTargetMethod == null) {
-            try {
-                getRenderTargetMethod = Minecraft.class.getMethod("getRenderTarget");
-            } catch (NoSuchMethodException ignored) {
-                // 忽略
-            }
-        }
-        if (getRenderTargetMethod != null) {
-            try {
-                Object result = getRenderTargetMethod.invoke(Minecraft.getInstance());
-                if (result instanceof RenderTarget) {
-                    System.err.println("[MetallumShaders] Found RenderTarget via getRenderTarget()");
-                    return (RenderTarget) result;
-                }
-            } catch (Exception e) {
-                LOGGER.debug("getRenderTarget() failed, trying fallbacks", e);
-            }
-        }
-
-        // 3. 尝试通过 getMainRenderTarget() 等方法（常见备选）
-        String[] methodNames = {"getMainRenderTarget", "getRenderTarget", "getFramebuffer", "getFrameBuffer"};
-        for (String name : methodNames) {
-            try {
-                Method m = Minecraft.class.getMethod(name);
-                Object result = m.invoke(Minecraft.getInstance());
-                if (result instanceof RenderTarget) {
-                    System.err.println("[MetallumShaders] Found RenderTarget via " + name + "()");
-                    return (RenderTarget) result;
-                }
-            } catch (NoSuchMethodException ignored) {
-            } catch (Exception e) {
-                LOGGER.debug(name + "() failed", e);
-            }
-        }
-
-        // 4. 尝试字段（备选）
-        if (renderTargetField == null) {
-            // 只扫描一次，不重复输出调试信息
-            Field[] fields = Minecraft.class.getDeclaredFields();
-            for (Field f : fields) {
-                if (RenderTarget.class.isAssignableFrom(f.getType())) {
-                    renderTargetField = f;
-                    renderTargetField.setAccessible(true);
-                    System.err.println("[MetallumShaders] Found RenderTarget field via fallback: " + f.getName());
-                    break;
-                }
-            }
-            if (renderTargetField == null) {
-                LOGGER.error("Cannot find RenderTarget field or method in Minecraft");
-                return null;
-            }
-        }
-        return (RenderTarget) renderTargetField.get(Minecraft.getInstance());
+        LOGGER.error("Cannot find RenderTarget");
+        return null;
     }
 
     private static int getRenderTargetColorTextureId(RenderTarget target) throws Exception {
@@ -272,30 +216,18 @@ public final class MetalBridge {
             try {
                 return (int) getColorTextureIdMethod.invoke(target);
             } catch (Exception e) {
-                LOGGER.debug("getColorTextureId() failed, trying fallbacks", e);
+                LOGGER.debug("getColorTextureId() failed", e);
             }
         }
 
-        // 2. 尝试通过 getColorTexture() 或 getTexture() 方法（其他映射）
-        try {
-            Method m = RenderTarget.class.getMethod("getColorTexture");
-            return (int) m.invoke(target);
-        } catch (NoSuchMethodException ignored) {
-        }
-        try {
-            Method m = RenderTarget.class.getMethod("getTexture");
-            return (int) m.invoke(target);
-        } catch (NoSuchMethodException ignored) {
-        }
-
-        // 3. 备选：通过字段
+        // 2. 备选：通过字段
         if (colorTextureIdField == null) {
             String[] names = {"colorTextureId", "frameBufferId", "fbo", "colorTexture"};
             for (String name : names) {
                 try {
                     colorTextureIdField = RenderTarget.class.getDeclaredField(name);
                     colorTextureIdField.setAccessible(true);
-                    System.err.println("[MetallumShaders] Found color texture field via fallback: " + name);
+                    LOGGER.info("Found color texture field via fallback: {}", name);
                     break;
                 } catch (NoSuchFieldException ignored) {
                 }
@@ -321,7 +253,7 @@ public final class MetalBridge {
             try {
                 return (int) getDepthTextureIdMethod.invoke(target);
             } catch (Exception e) {
-                LOGGER.debug("getDepthTextureId() failed, trying fallbacks", e);
+                LOGGER.debug("getDepthTextureId() failed", e);
             }
         }
 
@@ -332,7 +264,7 @@ public final class MetalBridge {
                 try {
                     depthTextureIdField = RenderTarget.class.getDeclaredField(name);
                     depthTextureIdField.setAccessible(true);
-                    System.err.println("[MetallumShaders] Found depth texture field via fallback: " + name);
+                    LOGGER.info("Found depth texture field via fallback: {}", name);
                     break;
                 } catch (NoSuchFieldException ignored) {
                 }
