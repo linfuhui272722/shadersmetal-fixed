@@ -31,10 +31,6 @@ public final class MetalBridge {
     private static Method getColorTextureMethod;
     private static Method getDepthTextureMethod;
 
-    // 诊断标志
-    private static boolean colorTextureDiagnosed = false;
-    private static boolean depthTextureDiagnosed = false;
-
     private MetalBridge() {}
 
     public static synchronized void init() {
@@ -83,11 +79,16 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetColorTextureHandle();
-            if (handle <= 0) return -1L;
+            // 过滤无效句柄（小整数和负值）
+            if (handle <= 0x1000) {
+                LOGGER.debug("Color texture handle {} is invalid (<= 0x1000), skipping", handle);
+                return -1L;
+            }
             if (handle == cachedColorTextureHandle) {
                 return cachedColorTextureHandle;
             }
             cachedColorTextureHandle = handle;
+            LOGGER.debug("Color texture handle: 0x{}", Long.toHexString(handle));
             return handle;
 
         } catch (Throwable t) {
@@ -101,12 +102,16 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetDepthTextureHandle();
-            if (handle <= 0) return -1L;
+            if (handle <= 0x1000) {
+                LOGGER.debug("Depth texture handle {} is invalid (<= 0x1000), skipping", handle);
+                return -1L;
+            }
 
             if (handle == cachedDepthTextureHandle) {
                 return cachedDepthTextureHandle;
             }
             cachedDepthTextureHandle = handle;
+            LOGGER.debug("Depth texture handle: 0x{}", Long.toHexString(handle));
             return handle;
 
         } catch (Throwable t) {
@@ -116,6 +121,7 @@ public final class MetalBridge {
     }
 
     public static Optional<Long> getMainNormalTextureHandle() {
+        // 大多数渲染目标没有法线纹理
         return Optional.empty();
     }
 
@@ -159,8 +165,8 @@ public final class MetalBridge {
             try {
                 Object tex = getColorTextureMethod.invoke(target);
                 if (tex != null) {
-                    long handle = extractMetalHandle(tex, "Color");
-                    if (handle > 0) return handle;
+                    long handle = extractMetalHandle(tex);
+                    if (handle > 0x1000) return handle;
                 }
             } catch (Exception e) {
                 LOGGER.debug("getColorTexture() failed", e);
@@ -179,20 +185,13 @@ public final class MetalBridge {
                 } catch (NoSuchFieldException ignored) {}
             }
             if (colorTextureField == null) {
-                // 诊断：打印所有字段
-                if (!colorTextureDiagnosed) {
-                    colorTextureDiagnosed = true;
-                    LOGGER.warn("Cannot find color texture field in RenderTarget, available fields:");
-                    for (Field f : RenderTarget.class.getDeclaredFields()) {
-                        LOGGER.warn("  {} : {}", f.getName(), f.getType().getName());
-                    }
-                }
+                LOGGER.warn("Cannot find color texture field in RenderTarget");
                 return -1L;
             }
         }
         Object tex = colorTextureField.get(target);
         if (tex == null) return -1L;
-        return extractMetalHandle(tex, "Color");
+        return extractMetalHandle(tex);
     }
 
     private static long getRenderTargetDepthTextureHandle() throws Exception {
@@ -209,8 +208,8 @@ public final class MetalBridge {
             try {
                 Object tex = getDepthTextureMethod.invoke(target);
                 if (tex != null) {
-                    long handle = extractMetalHandle(tex, "Depth");
-                    if (handle > 0) return handle;
+                    long handle = extractMetalHandle(tex);
+                    if (handle > 0x1000) return handle;
                 }
             } catch (Exception e) {
                 LOGGER.debug("getDepthTexture() failed", e);
@@ -229,128 +228,116 @@ public final class MetalBridge {
                 } catch (NoSuchFieldException ignored) {}
             }
             if (depthTextureField == null) {
-                if (!depthTextureDiagnosed) {
-                    depthTextureDiagnosed = true;
-                    LOGGER.warn("Cannot find depth texture field in RenderTarget");
-                }
+                LOGGER.warn("Cannot find depth texture field in RenderTarget");
                 return -1L;
             }
         }
         Object tex = depthTextureField.get(target);
         if (tex == null) return -1L;
-        return extractMetalHandle(tex, "Depth");
+        return extractMetalHandle(tex);
     }
 
     /**
      * 从 MetalGpuTexture 对象中提取 Metal 纹理句柄（long）
-     * 优先尝试公共方法，再尝试字段，特别处理 MemorySegment
+     * 专门处理 nativeHandle 字段（MemorySegment），使用公共方法 address()
      */
-    private static long extractMetalHandle(Object texObj, String textureType) {
+    private static long extractMetalHandle(Object texObj) {
         if (texObj == null) return -1L;
         Class<?> clazz = texObj.getClass();
-        LOGGER.info("Extracting {} handle from class: {}", textureType, clazz.getName());
 
-        // 1. 尝试公共方法（优先）
+        // 1. 优先直接访问 nativeHandle 字段
+        try {
+            Field nativeHandleField = clazz.getDeclaredField("nativeHandle");
+            nativeHandleField.setAccessible(true);
+            Object nativeHandle = nativeHandleField.get(texObj);
+            if (nativeHandle != null) {
+                long addr = extractMemorySegmentAddress(nativeHandle);
+                if (addr > 0x1000) {
+                    LOGGER.debug("Extracted handle 0x{} from nativeHandle field", Long.toHexString(addr));
+                    return addr;
+                }
+            }
+        } catch (NoSuchFieldException e) {
+            // 如果没有 nativeHandle，继续尝试其他方式
+        } catch (Throwable t) {
+            LOGGER.debug("Failed to access nativeHandle: {}", t.getMessage());
+        }
+
+        // 2. 尝试调用可能返回 MemorySegment 或 Long 的方法
         for (Method m : clazz.getMethods()) {
             String name = m.getName().toLowerCase();
-            // 优先方法名包含 handle, address, pointer, native
-            if (name.contains("handle") || name.contains("address") || name.contains("pointer") || name.contains("native")) {
-                if (m.getParameterCount() == 0) {
-                    try {
-                        m.setAccessible(true); // 如果方法是公共的，但可能依然需要，但 public 不需要
-                        Object result = m.invoke(texObj);
-                        if (result instanceof Long) {
-                            long h = (Long) result;
-                            if (h > 0) {
-                                LOGGER.info("Extracted {} handle {} via method {}", textureType, h, m.getName());
-                                return h;
+            if ((name.contains("handle") || name.contains("address") || name.contains("native")) && m.getParameterCount() == 0) {
+                try {
+                    Object result = m.invoke(texObj);
+                    if (result != null) {
+                        // 如果返回 MemorySegment
+                        if (result.getClass().getName().contains("MemorySegment")) {
+                            long addr = extractMemorySegmentAddress(result);
+                            if (addr > 0x1000) {
+                                LOGGER.debug("Extracted handle 0x{} via method {}", Long.toHexString(addr), m.getName());
+                                return addr;
                             }
-                        } else if (result instanceof Number) {
-                            long h = ((Number) result).longValue();
-                            if (h > 0) {
-                                LOGGER.info("Extracted {} handle {} via method {}", textureType, h, m.getName());
-                                return h;
-                            }
-                        } else if (result != null && result.getClass().getName().contains("MemorySegment")) {
-                            long h = extractFromMemorySegment(result);
-                            if (h > 0) {
-                                LOGGER.info("Extracted {} handle {} via MemorySegment from method {}", textureType, h, m.getName());
-                                return h;
+                        } else if (result instanceof Long || result instanceof Number) {
+                            long val = ((Number) result).longValue();
+                            if (val > 0x1000) {
+                                LOGGER.debug("Extracted handle 0x{} via method {}", Long.toHexString(val), m.getName());
+                                return val;
                             }
                         }
-                    } catch (Exception e) {
-                        LOGGER.debug("Method {} failed: {}", m.getName(), e.getMessage());
                     }
-                }
+                } catch (Throwable ignored) {}
             }
         }
 
-        // 2. 尝试字段（包括私有字段）
+        // 3. 遍历字段（跳过 views 等已知无效字段）
         for (Field f : clazz.getDeclaredFields()) {
+            String name = f.getName();
+            if ("views".equals(name) || "device".equals(name) || "mtlPixelFormat".equals(name)) {
+                continue;
+            }
             try {
                 f.setAccessible(true);
                 Object val = f.get(texObj);
-                if (val instanceof Long) {
-                    long h = (Long) val;
-                    if (h > 0) {
-                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, f.getName());
-                        return h;
-                    }
-                } else if (val instanceof Number) {
-                    long h = ((Number) val).longValue();
-                    if (h > 0) {
-                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, f.getName());
-                        return h;
-                    }
-                } else if (val != null && val.getClass().getName().contains("MemorySegment")) {
-                    long h = extractFromMemorySegment(val);
-                    if (h > 0) {
-                        LOGGER.info("Extracted {} handle {} from MemorySegment field {}", textureType, h, f.getName());
-                        return h;
+                if (val != null) {
+                    // 如果是 MemorySegment
+                    if (val.getClass().getName().contains("MemorySegment")) {
+                        long addr = extractMemorySegmentAddress(val);
+                        if (addr > 0x1000) {
+                            LOGGER.debug("Extracted handle 0x{} from field {}", Long.toHexString(addr), name);
+                            return addr;
+                        }
+                    } else if (val instanceof Long || val instanceof Number) {
+                        long num = ((Number) val).longValue();
+                        if (num > 0x1000) {
+                            LOGGER.debug("Extracted handle 0x{} from field {}", Long.toHexString(num), name);
+                            return num;
+                        }
                     }
                 }
-            } catch (Throwable t) {
-                // 忽略访问错误（包括模块限制）
-                LOGGER.debug("Field {} access error: {}", f.getName(), t.getMessage());
-            }
+            } catch (Throwable ignored) {}
         }
 
-        // 3. 如果所有方法都失败，打印诊断信息
-        LOGGER.warn("Could not extract {} handle from {}.", textureType, clazz.getName());
+        LOGGER.warn("Failed to extract a valid Metal handle from {}", clazz.getName());
         return -1L;
     }
 
     /**
-     * 从 MemorySegment 对象中提取地址
+     * 从 MemorySegment 对象中提取地址（使用公共方法 address()）
      */
-    private static long extractFromMemorySegment(Object segmentObj) {
+    private static long extractMemorySegmentAddress(Object segmentObj) {
         if (segmentObj == null) return -1L;
         try {
-            // 尝试调用 address() 方法
             Method addressMethod = segmentObj.getClass().getMethod("address");
             Object result = addressMethod.invoke(segmentObj);
             if (result instanceof Long) {
-                long h = (Long) result;
-                if (h > 0) return h;
+                long addr = (Long) result;
+                if (addr > 0) return addr;
             } else if (result instanceof Number) {
-                long h = ((Number) result).longValue();
-                if (h > 0) return h;
+                long addr = ((Number) result).longValue();
+                if (addr > 0) return addr;
             }
-        } catch (Exception e) {
-            LOGGER.debug("MemorySegment.address() failed: {}", e.getMessage());
-            // 尝试通过字段
-            try {
-                Field addrField = segmentObj.getClass().getDeclaredField("address");
-                addrField.setAccessible(true);
-                Object val = addrField.get(segmentObj);
-                if (val instanceof Long) {
-                    long h = (Long) val;
-                    if (h > 0) return h;
-                } else if (val instanceof Number) {
-                    long h = ((Number) val).longValue();
-                    if (h > 0) return h;
-                }
-            } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            LOGGER.debug("Failed to get address from MemorySegment: {}", t.getMessage());
         }
         return -1L;
     }
@@ -363,12 +350,12 @@ public final class MetalBridge {
                 try {
                     renderTargetField = GameRenderer.class.getDeclaredField("mainRenderTarget");
                     renderTargetField.setAccessible(true);
-                    LOGGER.info("Found mainRenderTarget field in GameRenderer");
+                    LOGGER.debug("Found mainRenderTarget field in GameRenderer");
                 } catch (NoSuchFieldException ignored) {
                     try {
                         renderTargetField = GameRenderer.class.getDeclaredField("renderTarget");
                         renderTargetField.setAccessible(true);
-                        LOGGER.info("Found renderTarget field in GameRenderer");
+                        LOGGER.debug("Found renderTarget field in GameRenderer");
                     } catch (NoSuchFieldException ignored2) {
                         LOGGER.error("Cannot find RenderTarget field in GameRenderer");
                     }
