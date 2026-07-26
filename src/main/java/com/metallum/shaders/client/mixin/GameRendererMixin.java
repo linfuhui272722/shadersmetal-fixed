@@ -79,8 +79,13 @@ public abstract class GameRendererMixin {
         
         uniformData.flip();
 
+        // ★ 修复：将 Direct ByteBuffer 转换为普通字节数组
+        // DirectBuffer 不支持 array()，必须使用 get() 方法复制数据
+        byte[] uniformBytes = new byte[uniformData.remaining()];
+        uniformData.get(uniformBytes);
+
         long device = MetalBridge.getDeviceHandle();
-        long uniformBuffer = MetalNative.createBuffer(device, uniformData.array(), uniformData.remaining());
+        long uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
 
         // 5. 执行绘制
         int result = MetalNative.dispatchFullscreen(
@@ -91,7 +96,7 @@ public abstract class GameRendererMixin {
             normalSrc,
             colorDst,
             uniformBuffer,
-            uniformData.remaining()
+            uniformBytes.length
         );
         
         if (result != 0) {
