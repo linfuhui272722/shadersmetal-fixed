@@ -16,6 +16,19 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Loads the bundled {@code .metal} sources, compiles them through
+ * Metallum's {@code MTLDevice}, and caches the resulting pipeline state
+ * objects keyed by pass name.
+ *
+ * <p>Passes:
+ * <ul>
+ *   <li>{@code composite} — deferred lighting + volumetric fog + moving lights</li>
+ *   <li>{@code bloom_h} — horizontal separable bloom</li>
+ *   <li>{@code bloom_v} — vertical separable bloom</li>
+ *   <li>{@code tonemap} — ACES tone map + saturation + vignette</li>
+ * </ul>
+ */
 public final class ShaderManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/Shader");
@@ -34,31 +47,40 @@ public final class ShaderManager {
         if (initialised) return available;
         initialised = true;
 
+        LOGGER.info("=== ShaderManager.init() START ===");
+
         if (!NativeLoader.ensureLoaded()) {
             LOGGER.warn("Native shim not loaded; shaders disabled.");
             return false;
         }
+        LOGGER.info("NativeLoader OK");
+
         if (!MetalBridge.isAvailable()) {
             LOGGER.warn("Metallum Metal context not available; shaders disabled.");
             return false;
         }
+        LOGGER.info("MetalBridge OK");
 
         long device = MetalBridge.getDeviceHandle();
         if (device <= 0) {
             LOGGER.warn("MTLDevice handle is null; shaders disabled.");
             return false;
         }
+        LOGGER.info("MTLDevice handle: 0x{}", Long.toHexString(device));
 
         // Concatenate the include header + main source so the compiler
         // sees the shared structs / uniforms in one translation unit.
         // We bundle the vertex shader once, then each fragment pass.
         // Use loadSourceWithIncludes to recursively handle #include directives.
+        LOGGER.info("Loading shader sources...");
         String source = loadSourceWithIncludes("core/fullscreen_vertex.metal")
                 + "\n// === composite ===\n" + loadSourceWithIncludes("core/composite_fragment.metal")
                 + "\n// === bloom_h ===\n"  + loadSourceWithIncludes("post/bloom_horizontal_fragment.metal")
                 + "\n// === bloom_v ===\n"  + loadSourceWithIncludes("post/bloom_vertical_fragment.metal")
                 + "\n// === tonemap ===\n"  + loadSourceWithIncludes("post/tonemap_fragment.metal");
+        LOGGER.info("Shader source loaded, total length: {} chars", source.length());
 
+        LOGGER.info("Compiling Metal library...");
         libraryHandle = MetalNative.compileLibrary(device, source, "metallum_shaders.metal");
         if (libraryHandle == 0L) {
             LOGGER.error("Failed to compile Metal library — shaders disabled.");
@@ -71,29 +93,56 @@ public final class ShaderManager {
         int colorFmt = 80;
         int depthFmt = 55;
 
-        PIPELINES.put("composite",
-                MetalNative.buildPostPipeline(device, libraryHandle,
-                        "fullscreen_vertex", "composite_fragment", colorFmt, depthFmt));
-        PIPELINES.put("bloom_h",
-                MetalNative.buildPostPipeline(device, libraryHandle,
-                        "fullscreen_vertex", "bloom_horizontal_fragment", colorFmt, 0));
-        PIPELINES.put("bloom_v",
-                MetalNative.buildPostPipeline(device, libraryHandle,
-                        "fullscreen_vertex", "bloom_vertical_fragment", colorFmt, 0));
-        PIPELINES.put("tonemap",
-                MetalNative.buildPostPipeline(device, libraryHandle,
-                        "fullscreen_vertex", "tonemap_fragment", colorFmt, 0));
-
-        for (Map.Entry<String, Long> e : PIPELINES.entrySet()) {
-            if (e.getValue() == 0L) {
-                LOGGER.error("Pipeline '{}' failed to build.", e.getKey());
-                available = false;
-                return false;
-            }
-            LOGGER.info("Pipeline '{}' ready: handle={}", e.getKey(), e.getValue());
+        // --- Build composite pipeline ---
+        LOGGER.info("Building pipeline 'composite'...");
+        long compositePipe = MetalNative.buildPostPipeline(device, libraryHandle,
+                "fullscreen_vertex", "composite_fragment", colorFmt, depthFmt);
+        if (compositePipe == 0L) {
+            LOGGER.error("Failed to build pipeline 'composite'");
+            available = false;
+            return false;
         }
+        PIPELINES.put("composite", compositePipe);
+        LOGGER.info("Pipeline 'composite' ready: handle={}", compositePipe);
+
+        // --- Build bloom_h pipeline ---
+        LOGGER.info("Building pipeline 'bloom_h'...");
+        long bloomHPipe = MetalNative.buildPostPipeline(device, libraryHandle,
+                "fullscreen_vertex", "bloom_horizontal_fragment", colorFmt, 0);
+        if (bloomHPipe == 0L) {
+            LOGGER.error("Failed to build pipeline 'bloom_h'");
+            available = false;
+            return false;
+        }
+        PIPELINES.put("bloom_h", bloomHPipe);
+        LOGGER.info("Pipeline 'bloom_h' ready: handle={}", bloomHPipe);
+
+        // --- Build bloom_v pipeline ---
+        LOGGER.info("Building pipeline 'bloom_v'...");
+        long bloomVPipe = MetalNative.buildPostPipeline(device, libraryHandle,
+                "fullscreen_vertex", "bloom_vertical_fragment", colorFmt, 0);
+        if (bloomVPipe == 0L) {
+            LOGGER.error("Failed to build pipeline 'bloom_v'");
+            available = false;
+            return false;
+        }
+        PIPELINES.put("bloom_v", bloomVPipe);
+        LOGGER.info("Pipeline 'bloom_v' ready: handle={}", bloomVPipe);
+
+        // --- Build tonemap pipeline ---
+        LOGGER.info("Building pipeline 'tonemap'...");
+        long tonemapPipe = MetalNative.buildPostPipeline(device, libraryHandle,
+                "fullscreen_vertex", "tonemap_fragment", colorFmt, 0);
+        if (tonemapPipe == 0L) {
+            LOGGER.error("Failed to build pipeline 'tonemap'");
+            available = false;
+            return false;
+        }
+        PIPELINES.put("tonemap", tonemapPipe);
+        LOGGER.info("Pipeline 'tonemap' ready: handle={}", tonemapPipe);
 
         available = true;
+        LOGGER.info("All 4 pipelines built successfully!");
         LOGGER.info("Metallum shaders initialised.");
         return available;
     }
