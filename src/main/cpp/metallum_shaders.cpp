@@ -61,7 +61,7 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
     NSString* name   = [NSString stringWithUTF8String:nm];
 
     MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
-    opts.languageVersion = MTLLanguageVersion3_0;
+    opts.languageVersion = MTLLanguageVersion2_3;
 
     NSError* err = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:source
