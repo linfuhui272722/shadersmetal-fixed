@@ -13,11 +13,6 @@
 #include "include/common.metalh"
 using namespace metal;
 
-constant float WEIGHTS[9] = {
-    0.013519, 0.050120, 0.130645, 0.236084, 0.301137,
-    0.236084, 0.130645, 0.050120, 0.013519
-};
-
 fragment float4 bloom_horizontal_fragment(
     VSOut in [[stage_in]],
     texture2d<float, access::sample> colorTex [[texture(0)]],
