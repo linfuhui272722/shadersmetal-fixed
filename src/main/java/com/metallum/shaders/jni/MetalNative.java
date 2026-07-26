@@ -1,73 +1,97 @@
-package com.metallum.shaders.jni;
+package com.metallum.shaders.metal;
 
-/**
- * Raw JNI surface exposed by {@code libmetallum_shaders.dylib}.
- *
- * <p>Every method takes raw Metal handle pointers (the same {@code long}
- * values that {@link com.metallum.shaders.metal.MetalBridge} returns) and
- * returns 0 on success, non-zero on failure. The Java side is responsible
- * for translating those return codes into log messages.
- *
- * <p>The native implementation lives in {@code src/main/cpp/metallum_shaders.cpp}
- * and is compiled into the dylib by the {@code buildNative} gradle task
- * (see {@code build.gradle}).
- */
-public final class MetalNative {
+import com.metallum.shaders.jni.MetalNative;
+import com.metallum.shaders.jni.NativeLoader;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-    private MetalNative() {}
+import java.util.Optional;
 
-    /**
-     * Compile a Metal source string into a library on the given device.
-     *
-     * @param deviceHandle  {@code id<MTLDevice>}
-     * @param source        MSL source
-     * @param sourceName    filename used in error messages
-     * @return library handle, or 0 on failure
-     */
-    public static native long compileLibrary(long deviceHandle, String source, String sourceName);
+public final class MetalBridge {
 
-    /**
-     * Build a render pipeline state for a fullscreen-triangle post pass.
-     *
-     * @param deviceHandle    {@code id<MTLDevice>}
-     * @param libraryHandle   {@code id<MTLLibrary>}
-     * @param vertexFnName    vertex function name in the library
-     * @param fragmentFnName  fragment function name in the library
-     * @param pixelFormat     MTLPixelFormat of the color attachment (e.g. 80 = BGRA8Unorm)
-     * @param depthPixelFormat MTLPixelFormat of the depth attachment (e.g. 55 = Depth32Float)
-     * @return pipeline handle, or 0 on failure
-     */
-    public static native long buildPostPipeline(long deviceHandle, long libraryHandle,
-                                                String vertexFnName, String fragmentFnName,
-                                                int pixelFormat, int depthPixelFormat);
+    private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/MetalBridge");
 
-    /**
-     * Issue a fullscreen-triangle draw with the given pipeline, sampling
-     * the supplied color/depth textures and writing into the supplied
-     * destination texture.
-     *
-     * @param cmdBufferHandle  {@code id<MTLCommandBuffer>}
-     * @param pipelineHandle   {@code id<MTLRenderPipelineState>}
-     * @param colorSrcHandle   {@code id<MTLTexture>} (input color)
-     * @param depthSrcHandle   {@code id<MTLTexture>} (input depth)
-     * @param normalSrcHandle  {@code id<MTLTexture>} (input normals, 0 if none)
-     * @param colorDstHandle   {@code id<MTLTexture>} (output color)
-     * @param uniformBuffer    pointer to a packed uniform struct
-     * @param uniformSize      size of the uniform struct in bytes
-     * @return 0 on success
-     */
-    public static native int dispatchFullscreen(long cmdBufferHandle, long pipelineHandle,
-                                                long colorSrcHandle, long depthSrcHandle,
-                                                long normalSrcHandle, long colorDstHandle,
-                                                long uniformBuffer, long uniformSize);
+    private static volatile boolean initialised = false;
+    private static volatile boolean available = false;
+    private static long deviceHandle = -1L;
 
-    /**
-     * Allocate a {@code MTLBuffer} on the device and copy the supplied
-     * bytes into it. Returns the buffer handle, or 0 on failure.
-     */
-    public static native long createBuffer(long deviceHandle, byte[] data, long size);
+    private MetalBridge() {}
 
-    /** Release any Metal object by handle. Safe to call with 0. */
-    public static native void release(long handle);
+    public static synchronized void init() {
+        if (initialised) return;
+        initialised = true;
+
+        try {
+            // 1. 加载 Native 库
+            if (!NativeLoader.ensureLoaded()) {
+                LOGGER.warn("Native shim not loaded; Metal bridge unavailable.");
+                return;
+            }
+
+            // 2. 从 MetalNative 获取设备
+            deviceHandle = MetalNative.getDefaultDevice();
+            if (deviceHandle <= 0) {
+                LOGGER.warn("Failed to obtain MTLDevice handle from MetalNative.");
+                return;
+            }
+
+            available = true;
+            LOGGER.info("MetalBridge initialised (device handle: 0x{})", Long.toHexString(deviceHandle));
+        } catch (Throwable t) {
+            LOGGER.warn("Failed to initialise MetalBridge", t);
+        }
+    }
+
+    public static boolean isAvailable() {
+        if (!initialised) init();
+        return available;
+    }
+
+    public static long getDeviceHandle() {
+        if (!isAvailable()) return -1L;
+        return deviceHandle;
+    }
+
+    public static long getCurrentDeviceHandle() {
+        return getDeviceHandle();
+    }
+
+    // ---------- 纹理获取（需要额外实现） ----------
+    // 如果你自己实现了从游戏 framebuffer 获取纹理的 JNI 方法，
+    // 在这里调用它们。目前返回 -1 表示不可用。
+    public static long getMainColorTextureHandle() {
+        if (!isAvailable()) return -1L;
+        // TODO: 实现你自己的纹理获取
+        return -1L;
+    }
+
+    public static long getMainDepthTextureHandle() {
+        if (!isAvailable()) return -1L;
+        return -1L;
+    }
+
+    public static Optional<Long> getMainNormalTextureHandle() {
+        if (!isAvailable()) return Optional.empty();
+        return Optional.empty();
+    }
+
+    public static long getCommandQueueHandle() {
+        if (!isAvailable()) return -1L;
+        // TODO: 如果需要，从 MetalNative 获取
+        return -1L;
+    }
+
+    public static long getCurrentCommandBufferHandle() {
+        if (!isAvailable()) return -1L;
+        // TODO: 如果需要，从 MetalNative 获取
+        return -1L;
+    }
+
+    public static long getCommandBufferHandle() {
+        return getCurrentCommandBufferHandle();
+    }
+
+    public static void submitCommandBuffer() {
+        // TODO: 提交命令
+    }
 }
-
