@@ -26,6 +26,25 @@
 extern "C" {
 
 // =========================================================================
+// getDefaultDevice
+//   Java: MetalNative.getDefaultDevice()
+//   Returns a retained jlong pointing to the system default MTLDevice.
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv* env, jclass) {
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (!device) {
+            NSLog(@"[MetallumShaders] Failed to create default MTLDevice");
+            return 0LL;
+        }
+        // Retain the device and hand ownership to Java.
+        // The Java side will call MetalNative.release(handle) when done.
+        return (jlong)(__bridge_retained void*)device;
+    }
+}
+
+// =========================================================================
 // compileLibrary
 //   Java: MetalNative.compileLibrary(long device, String src, String name)
 // =========================================================================
