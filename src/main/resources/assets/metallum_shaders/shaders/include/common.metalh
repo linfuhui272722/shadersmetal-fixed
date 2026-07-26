@@ -5,6 +5,12 @@
 #include "include/uniforms.metalh"
 using namespace metal;
 
+// === 常量定义 ===
+constant float WEIGHTS[9] = {
+    0.013519, 0.050120, 0.130645, 0.236084, 0.301137,
+    0.236084, 0.130645, 0.050120, 0.013519
+};
+
 // Reconstruct world-space position from a depth sample and the inverse
 // view-projection matrix. This is the standard "deferred world rebuild"
 // used by MakeUp-UltraFast and most modern shaderpacks.
