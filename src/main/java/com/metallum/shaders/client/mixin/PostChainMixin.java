@@ -1,5 +1,7 @@
 package com.metallum.shaders.client.mixin;
 
+import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import net.minecraft.client.renderer.PostChain;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -16,7 +18,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class PostChainMixin {
 
     @Inject(method = "process", at = @At("HEAD"), cancellable = true)
-    private void metallum_shaders$suppressVanillaPost(float tickDelta, CallbackInfo ci) {
+    private void metallum_shaders$suppressVanillaPost(RenderTarget renderTarget, 
+                                                       GraphicsResourceAllocator allocator, 
+                                                       CallbackInfo ci) {
         if (com.metallum.shaders.ShaderConfig.INSTANCE.enabled
                 && com.metallum.shaders.shader.ShaderManager.isAvailable()) {
             ci.cancel();
