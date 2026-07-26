@@ -9,7 +9,6 @@
     "GameRendererMixin",
     "RenderSystemMixin",
     "PostChainMixin",
-    "MinecraftClientMixin"
   ],
   "injectors": {
     "defaultRequire": 1
