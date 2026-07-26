@@ -121,8 +121,16 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     desc.vertexFunction = vfn;
     desc.fragmentFunction = ffn;
     desc.colorAttachments[0].pixelFormat = (MTLPixelFormat) colorFormat;
-    desc.depthAttachmentPixelFormat = (MTLPixelFormat) depthFormat;
     desc.colorAttachments[0].blendingEnabled = NO;
+
+    // ★ 修复：使用 Metal 枚举而不是硬编码值
+    if (depthFormat == 55) {
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    } else if (depthFormat == 0) {
+        desc.depthAttachmentPixelFormat = MTLPixelFormatInvalid;
+    } else {
+        desc.depthAttachmentPixelFormat = (MTLPixelFormat) depthFormat;
+    }
 
     // 额外日志：确认设置后的值
     NSLog(@"[MetallumShaders]   After assignment: depthAttachmentPixelFormat = %d", (int)desc.depthAttachmentPixelFormat);
