@@ -243,89 +243,115 @@ public final class MetalBridge {
 
     /**
      * 从 MetalGpuTexture 对象中提取 Metal 纹理句柄（long）
-     * 支持 MemorySegment 类型的 nativeHandle 字段
+     * 优先尝试公共方法，再尝试字段，特别处理 MemorySegment
      */
-    private static long extractMetalHandle(Object texObj, String textureType) throws Exception {
+    private static long extractMetalHandle(Object texObj, String textureType) {
         if (texObj == null) return -1L;
         Class<?> clazz = texObj.getClass();
         LOGGER.info("Extracting {} handle from class: {}", textureType, clazz.getName());
 
-        // 如果直接是 Long 或 Number
-        if (texObj instanceof Long) return (Long) texObj;
-        if (texObj instanceof Number) return ((Number) texObj).longValue();
-
-        // 检查是否为 MemorySegment，尝试调用 address() 或获取 address 字段
-        if (clazz.getName().contains("MemorySegment")) {
-            try {
-                // 尝试调用 address() 方法
-                Method addressMethod = clazz.getMethod("address");
-                Object addr = addressMethod.invoke(texObj);
-                if (addr instanceof Long) {
-                    long h = (Long) addr;
-                    if (h > 0) {
-                        LOGGER.info("Extracted {} handle {} via MemorySegment.address()", textureType, h);
-                        return h;
+        // 1. 尝试公共方法（优先）
+        for (Method m : clazz.getMethods()) {
+            String name = m.getName().toLowerCase();
+            // 优先方法名包含 handle, address, pointer, native
+            if (name.contains("handle") || name.contains("address") || name.contains("pointer") || name.contains("native")) {
+                if (m.getParameterCount() == 0) {
+                    try {
+                        m.setAccessible(true); // 如果方法是公共的，但可能依然需要，但 public 不需要
+                        Object result = m.invoke(texObj);
+                        if (result instanceof Long) {
+                            long h = (Long) result;
+                            if (h > 0) {
+                                LOGGER.info("Extracted {} handle {} via method {}", textureType, h, m.getName());
+                                return h;
+                            }
+                        } else if (result instanceof Number) {
+                            long h = ((Number) result).longValue();
+                            if (h > 0) {
+                                LOGGER.info("Extracted {} handle {} via method {}", textureType, h, m.getName());
+                                return h;
+                            }
+                        } else if (result != null && result.getClass().getName().contains("MemorySegment")) {
+                            long h = extractFromMemorySegment(result);
+                            if (h > 0) {
+                                LOGGER.info("Extracted {} handle {} via MemorySegment from method {}", textureType, h, m.getName());
+                                return h;
+                            }
+                        }
+                    } catch (Exception e) {
+                        LOGGER.debug("Method {} failed: {}", m.getName(), e.getMessage());
                     }
                 }
-            } catch (NoSuchMethodException e) {
-                // 如果 address() 方法不存在，尝试获取 address 字段
-                try {
-                    Field addressField = clazz.getDeclaredField("address");
-                    addressField.setAccessible(true);
-                    Object addr = addressField.get(texObj);
-                    if (addr instanceof Long) {
-                        long h = (Long) addr;
-                        if (h > 0) {
-                            LOGGER.info("Extracted {} handle {} via MemorySegment.address field", textureType, h);
-                            return h;
-                        }
-                    }
-                } catch (NoSuchFieldException ignored) {}
             }
         }
 
-        // 尝试常见字段名
-        String[] fieldNames = {"handle", "textureHandle", "metalTextureHandle", "nativeHandle", "pointer", "ptr", "address", "texture"};
-        for (String name : fieldNames) {
+        // 2. 尝试字段（包括私有字段）
+        for (Field f : clazz.getDeclaredFields()) {
             try {
-                Field field = clazz.getDeclaredField(name);
-                field.setAccessible(true);
-                Object value = field.get(texObj);
-                if (value instanceof Long) {
-                    long h = (Long) value;
+                f.setAccessible(true);
+                Object val = f.get(texObj);
+                if (val instanceof Long) {
+                    long h = (Long) val;
                     if (h > 0) {
-                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, name);
+                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, f.getName());
                         return h;
                     }
-                } else if (value instanceof Number) {
-                    long h = ((Number) value).longValue();
+                } else if (val instanceof Number) {
+                    long h = ((Number) val).longValue();
                     if (h > 0) {
-                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, name);
+                        LOGGER.info("Extracted {} handle {} from field {}", textureType, h, f.getName());
                         return h;
                     }
-                } else if (value != null && value.getClass().getName().contains("MemorySegment")) {
-                    // 递归处理 MemorySegment
-                    long h = extractMetalHandle(value, textureType + "(nested)");
+                } else if (val != null && val.getClass().getName().contains("MemorySegment")) {
+                    long h = extractFromMemorySegment(val);
+                    if (h > 0) {
+                        LOGGER.info("Extracted {} handle {} from MemorySegment field {}", textureType, h, f.getName());
+                        return h;
+                    }
+                }
+            } catch (Throwable t) {
+                // 忽略访问错误（包括模块限制）
+                LOGGER.debug("Field {} access error: {}", f.getName(), t.getMessage());
+            }
+        }
+
+        // 3. 如果所有方法都失败，打印诊断信息
+        LOGGER.warn("Could not extract {} handle from {}.", textureType, clazz.getName());
+        return -1L;
+    }
+
+    /**
+     * 从 MemorySegment 对象中提取地址
+     */
+    private static long extractFromMemorySegment(Object segmentObj) {
+        if (segmentObj == null) return -1L;
+        try {
+            // 尝试调用 address() 方法
+            Method addressMethod = segmentObj.getClass().getMethod("address");
+            Object result = addressMethod.invoke(segmentObj);
+            if (result instanceof Long) {
+                long h = (Long) result;
+                if (h > 0) return h;
+            } else if (result instanceof Number) {
+                long h = ((Number) result).longValue();
+                if (h > 0) return h;
+            }
+        } catch (Exception e) {
+            LOGGER.debug("MemorySegment.address() failed: {}", e.getMessage());
+            // 尝试通过字段
+            try {
+                Field addrField = segmentObj.getClass().getDeclaredField("address");
+                addrField.setAccessible(true);
+                Object val = addrField.get(segmentObj);
+                if (val instanceof Long) {
+                    long h = (Long) val;
+                    if (h > 0) return h;
+                } else if (val instanceof Number) {
+                    long h = ((Number) val).longValue();
                     if (h > 0) return h;
                 }
-            } catch (NoSuchFieldException ignored) {
-            } catch (Exception e) {
-                LOGGER.warn("Error accessing field {}: {}", name, e.getMessage());
-            }
+            } catch (Throwable ignored) {}
         }
-
-        // 如果没有找到，打印所有字段帮助诊断（但只打印一次）
-        LOGGER.warn("Could not extract {} handle from {}. Fields:", textureType, clazz.getName());
-        for (Field f : clazz.getDeclaredFields()) {
-            f.setAccessible(true);
-            try {
-                Object val = f.get(texObj);
-                LOGGER.warn("  {} = {} (type {})", f.getName(), val, val != null ? val.getClass().getSimpleName() : "null");
-            } catch (Exception e) {
-                LOGGER.warn("  {} : access error", f.getName());
-            }
-        }
-
         return -1L;
     }
 
