@@ -54,13 +54,13 @@ public abstract class GameRendererMixin {
         ByteBuffer uniformData = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         
         float time = System.currentTimeMillis() / 1000.0f;
-        float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);  // 从 DeltaTracker 获取
+        float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
         uniformData.putFloat(time);              
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // 获取 Camera
-        Camera camera = Minecraft.getInstance().camera;
+        // 获取 Camera（使用 getCamera() 方法）
+        Camera camera = Minecraft.getInstance().getCamera();
         if (camera != null) {
             uniformData.putFloat((float) camera.position().x);
             uniformData.putFloat((float) camera.position().y);
@@ -95,7 +95,7 @@ public abstract class GameRendererMixin {
     }
 
     /**
-     * 关闭时的清理逻辑保持不变
+     * 关闭时的清理逻辑
      */
     @Inject(method = "close", at = @At("RETURN"))
     private void metallum_shaders$onClose(CallbackInfo ci) {
