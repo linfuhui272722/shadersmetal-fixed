@@ -2,15 +2,14 @@ package com.metallum.shaders.metal;
 
 import com.metallum.shaders.jni.MetalNative;
 import com.metallum.shaders.jni.NativeLoader;
+import com.mojang.blaze3d.pipeline.RenderTarget;
+import net.minecraft.client.Minecraft;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Field;
 import java.util.Optional;
 
-/**
- * Self-contained Metal bridge that uses our own native library.
- * No external Metallum mod is required.
- */
 public final class MetalBridge {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/MetalBridge");
@@ -19,6 +18,12 @@ public final class MetalBridge {
     private static volatile boolean available = false;
     private static long deviceHandle = -1L;
 
+    // 缓存纹理句柄
+    private static long cachedColorTextureHandle = -1L;
+    private static long cachedDepthTextureHandle = -1L;
+    private static int lastColorTextureId = -1;
+    private static int lastDepthTextureId = -1;
+
     private MetalBridge() {}
 
     public static synchronized void init() {
@@ -26,13 +31,11 @@ public final class MetalBridge {
         initialised = true;
 
         try {
-            // 1. 加载 Native 库
             if (!NativeLoader.ensureLoaded()) {
                 LOGGER.warn("Native shim not loaded; Metal bridge unavailable.");
                 return;
             }
 
-            // 2. 从 MetalNative 获取设备
             deviceHandle = MetalNative.getDefaultDevice();
             if (deviceHandle <= 0) {
                 LOGGER.warn("Failed to obtain MTLDevice handle from MetalNative.");
@@ -60,33 +63,88 @@ public final class MetalBridge {
         return getDeviceHandle();
     }
 
-    // ---------- 纹理获取（当前返回 -1，需要进一步实现） ----------
+    // =====================================================================
+    // 纹理获取 - 从 Minecraft 的 RenderTarget 中获取
+    // =====================================================================
+
+    /**
+     * 获取主颜色纹理句柄（从 Minecraft 的 RenderTarget 中获取）
+     * 对应 Yarn: MinecraftClient.getFramebuffer() -> Mojang: Minecraft.mainRenderTarget
+     */
     public static long getMainColorTextureHandle() {
         if (!isAvailable()) return -1L;
-        // TODO: 实现从游戏 framebuffer 获取颜色纹理
-        return -1L;
+        
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            RenderTarget renderTarget = mc.mainRenderTarget;
+            if (renderTarget == null) {
+                return -1L;
+            }
+            
+            int textureId = getRenderTargetColorTextureId(renderTarget);
+            if (textureId <= 0) {
+                return -1L;
+            }
+            
+            if (textureId == lastColorTextureId && cachedColorTextureHandle != -1L) {
+                return cachedColorTextureHandle;
+            }
+            lastColorTextureId = textureId;
+            
+            cachedColorTextureHandle = MetalNative.getMetalTextureFromGLTexture(textureId);
+            return cachedColorTextureHandle;
+            
+        } catch (Throwable t) {
+            LOGGER.warn("Failed to get main color texture", t);
+            return -1L;
+        }
     }
 
     public static long getMainDepthTextureHandle() {
         if (!isAvailable()) return -1L;
-        return -1L;
+        
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            RenderTarget renderTarget = mc.mainRenderTarget;
+            if (renderTarget == null) {
+                return -1L;
+            }
+            
+            int textureId = getRenderTargetDepthTextureId(renderTarget);
+            if (textureId <= 0) {
+                return -1L;
+            }
+            
+            if (textureId == lastDepthTextureId && cachedDepthTextureHandle != -1L) {
+                return cachedDepthTextureHandle;
+            }
+            lastDepthTextureId = textureId;
+            
+            cachedDepthTextureHandle = MetalNative.getMetalTextureFromGLTexture(textureId);
+            return cachedDepthTextureHandle;
+            
+        } catch (Throwable t) {
+            LOGGER.warn("Failed to get main depth texture", t);
+            return -1L;
+        }
     }
 
     public static Optional<Long> getMainNormalTextureHandle() {
-        if (!isAvailable()) return Optional.empty();
         return Optional.empty();
     }
 
+    // =====================================================================
+    // 命令缓冲区
+    // =====================================================================
+
     public static long getCommandQueueHandle() {
         if (!isAvailable()) return -1L;
-        // TODO: 如果实现 command queue 获取，可添加
-        return -1L;
+        return MetalNative.getDefaultCommandQueue();
     }
 
     public static long getCurrentCommandBufferHandle() {
         if (!isAvailable()) return -1L;
-        // TODO: 实现获取当前 command buffer
-        return -1L;
+        return MetalNative.createCommandBuffer();
     }
 
     public static long getCommandBufferHandle() {
@@ -94,6 +152,53 @@ public final class MetalBridge {
     }
 
     public static void submitCommandBuffer() {
-        // TODO: 实现提交
+        // 可扩展
+    }
+
+    // =====================================================================
+    // 反射辅助方法 - 使用 Mojang 映射
+    // =====================================================================
+
+    private static Field colorTextureIdField;
+    private static Field depthTextureIdField;
+
+    private static int getRenderTargetColorTextureId(RenderTarget target) throws Exception {
+        if (colorTextureIdField == null) {
+            String[] names = {"colorTextureId", "frameBufferId", "fbo"};
+            for (String name : names) {
+                try {
+                    colorTextureIdField = RenderTarget.class.getDeclaredField(name);
+                    colorTextureIdField.setAccessible(true);
+                    break;
+                } catch (NoSuchFieldException ignored) {}
+            }
+            if (colorTextureIdField == null) {
+                try {
+                    java.lang.reflect.Method m = RenderTarget.class.getMethod("getColorTextureId");
+                    return (int) m.invoke(target);
+                } catch (NoSuchMethodException e) {
+                    LOGGER.warn("Cannot find color texture field/method in RenderTarget");
+                    return -1;
+                }
+            }
+        }
+        return (int) colorTextureIdField.get(target);
+    }
+
+    private static int getRenderTargetDepthTextureId(RenderTarget target) throws Exception {
+        if (depthTextureIdField == null) {
+            String[] names = {"depthTextureId", "depthBufferId"};
+            for (String name : names) {
+                try {
+                    depthTextureIdField = RenderTarget.class.getDeclaredField(name);
+                    depthTextureIdField.setAccessible(true);
+                    break;
+                } catch (NoSuchFieldException ignored) {}
+            }
+            if (depthTextureIdField == null) {
+                return -1;
+            }
+        }
+        return (int) depthTextureIdField.get(target);
     }
 }
