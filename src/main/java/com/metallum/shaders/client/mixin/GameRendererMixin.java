@@ -59,8 +59,8 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // 获取 Camera（使用 getCamera() 方法）
-        Camera camera = Minecraft.getInstance().getCamera();
+        // ★ 修改点：直接使用 GameRenderer 的 camera 字段，避免访问 Minecraft 的 camera
+        Camera camera = this.camera;  // this 会被混入到 GameRenderer 实例中
         if (camera != null) {
             uniformData.putFloat((float) camera.position().x);
             uniformData.putFloat((float) camera.position().y);
