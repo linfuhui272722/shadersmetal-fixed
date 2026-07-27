@@ -3,6 +3,7 @@ package com.metallum.shaders.client.mixin;
 import com.metallum.shaders.metal.MetalBridge;
 import com.metallum.shaders.shader.ShaderManager;
 import com.metallum.shaders.jni.MetalNative;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -69,7 +70,11 @@ public abstract class GameRendererMixin {
         long colorDst = colorSrc;
         
         Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null) return; // 安全检查
+        
         Camera camera = MetalBridge.getMainCamera();
+        if (camera == null) return; // 安全检查
+        
         int width = mc.getWindow().getWidth();
         int height = mc.getWindow().getHeight();
         
@@ -78,27 +83,48 @@ public abstract class GameRendererMixin {
         // ==========================================
         ByteBuffer uniformData = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder());
 
-        // --- Offset 0: viewProj (mat4) ---
+        // --- 获取矩阵 ---
+        // 尝试从 RenderSystem 获取投影矩阵 (如果在世界渲染之后还是有效的)
+        // 注意：此时可能处于 GUI 渲染阶段，矩阵可能是正交投影。
+        // 我们优先尝试构建一个基于视角的标准透视投影矩阵。
+        
         Matrix4f viewProj = new Matrix4f();
-        viewProj.identity();
+        Matrix4f invViewProj = new Matrix4f();
+        
+        try {
+            // 1. 基础投影 (假设 FOV 70度)
+            float fov = 70.0f;
+            float aspect = (float) width / height;
+            float near = 0.05f;
+            float far = 1000.0f;
+            
+            // 构建投影矩阵
+            Matrix4f projection = new Matrix4f().perspective((float) Math.toRadians(fov), aspect, near, far);
+            
+            // 构建视图矩阵 (仅包含相机位置偏移，忽略旋转以防止因数据错误导致的完全黑屏)
+            // 如果你能获取到 Rotation，请加上。目前仅 Translation。
+            Matrix4f view = new Matrix4f().translation(
+                -(float)camera.position().x, 
+                -(float)camera.position().y, 
+                -(float)camera.position().z
+            );
+            
+            // viewProj = Projection * View
+            projection.mul(view, viewProj);
+            
+            // 计算逆矩阵
+            viewProj.invert(invViewProj);
+            
+        } catch (Exception e) {
+            LOGGER.warn("[MetallumShaders] Matrix calculation failed, using identity. " + e.getMessage());
+            viewProj.identity();
+            invViewProj.identity();
+        }
+
+        // --- Offset 0: viewProj (mat4) ---
         putMatrix(uniformData, viewProj);
 
         // --- Offset 64: invViewProj (mat4) ---
-        // 简化矩阵构建：使用基础投影和相机位置
-        Matrix4f invViewProj = new Matrix4f();
-        try {
-            float fov = 70.0f; // 固定 FOV 值，确保编译通过
-            float aspect = (float) width / height;
-            
-            // 构建基础投影矩阵
-            new Matrix4f().perspective((float) Math.toRadians(fov), aspect, 0.05f, 1000.0f)
-                // 应用相机位置偏移
-                .translate((float)-camera.position().x, (float)-camera.position().y, (float)-camera.position().z)
-                // 求逆
-                .invert(invViewProj);
-        } catch (Exception e) {
-            invViewProj.identity();
-        }
         putMatrix(uniformData, invViewProj);
 
         // --- Offset 128: cameraPos (float4) ---
@@ -144,7 +170,8 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(0);
         uniformData.putFloat(0);
 
-        // --- Offset 272: lights[16] ---
+        // --- Offset 272: lights[16] (Pad to 784 bytes) ---
+        // 确保 Buffer 大小足够
         int currentPos = uniformData.position();
         int targetSize = 784;
         if (currentPos < targetSize) {
