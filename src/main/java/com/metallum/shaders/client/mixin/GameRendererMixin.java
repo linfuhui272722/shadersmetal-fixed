@@ -47,7 +47,7 @@ public abstract class GameRendererMixin {
         long colorDst = colorSrc;
         
         int width = Minecraft.getInstance().getWindow().getWidth();
-        int height = Minecraft.getInstance().getWindow().getWindow().getHeight(); // 修正：使用正确的高度获取
+        int height = Minecraft.getInstance().getWindow().getHeight(); // 修正：正确获取高度
         
         ByteBuffer uniformData = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         uniformData.putFloat(System.currentTimeMillis() / 1000.0f);
