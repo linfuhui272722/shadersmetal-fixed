@@ -1,7 +1,7 @@
 package com.metallum.shaders.client.mixin;
 
 import com.metallum.shaders.metal.MetalBridge;
-import com.metum.shaders.shader.ShaderManager;
+import com.metallum.shaders.shader.ShaderManager;
 import com.metallum.shaders.jni.MetalNative;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -165,11 +165,11 @@ public abstract class GameRendererMixin {
         // 9. fogPack (Offset 224)
         cachedUniformBuffer.putFloat(0.002f).putFloat(1.0f).putFloat(0.5f).putFloat(0.2f);
 
-        // ★★★ 10. bloomPack (Offset 240) - 之前遗漏，导致错位 ★★★
+        // 10. bloomPack (Offset 240)
         // bloomThreshold, vignetteStrength, renderScale, pad
         cachedUniformBuffer.putFloat(0.8f).putFloat(0.2f).putFloat(1.0f).putFloat(0);
 
-        // 11. resolution (Offset 256) - 现在对齐了
+        // 11. resolution (Offset 256)
         // xy = resolution, z = lightCount, w = pad
         cachedUniformBuffer.putFloat(width).putFloat(height).putFloat(0).putFloat(0);
 
