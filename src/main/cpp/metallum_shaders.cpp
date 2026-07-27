@@ -1,18 +1,9 @@
 // metallum_shaders.cpp
 //
-// JNI shim that bridges Java -> Apple Metal. Compiled into
-// libmetallum_shaders.dylib by the `buildNative` gradle task.
+// JNI shim that bridges Java -> Apple Metal.
 //
-// IMPORTANT: This file is compiled with -fobjc-arc. All Objective-C
-// objects are automatically retained/released. Use __bridge for
-// non-ownership transfers, __bridge_retained to hand ownership from
-// ARC to a raw jlong, and __bridge_transfer to take ownership back.
-//
-// JNI function names MUST match the Java class's fully-qualified name:
-//   Java class: com.metallum.shaders.jni.MetalNative
-//   JNI symbol: Java_com_metallum_shaders_jni_MetalNative_<method>
-//
-// All Metal handles are passed as `jlong` (raw id<MTL...> pointers).
+// IMPORTANT: This file is compiled with -fobjc-arc.
+// All Objective-C objects are automatically retained/released.
 
 #include <jni.h>
 #include <objc/objc.h>
@@ -26,24 +17,32 @@
 extern "C" {
 
 // =========================================================================
+// 全局单例：防止每帧创建 Device/Queue 导致崩溃
+// =========================================================================
+static id<MTLDevice> g_sharedDevice = nil;
+static id<MTLCommandQueue> g_sharedQueue = nil;
+
+// =========================================================================
 // getDefaultDevice
-//   Java: MetalNative.getDefaultDevice()
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv* env, jclass) {
     @autoreleasepool {
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (!device) {
-            NSLog(@"[MetallumShaders] Failed to create default MTLDevice");
-            return 0LL;
+        if (g_sharedDevice == nil) {
+            g_sharedDevice = MTLCreateSystemDefaultDevice();
+            if (!g_sharedDevice) {
+                NSLog(@"[MetallumShaders] Failed to create default MTLDevice");
+                return 0LL;
+            }
+            // 同时创建 Queue
+            g_sharedQueue = [g_sharedDevice newCommandQueue];
         }
-        return (jlong)(__bridge_retained void*)device;
+        return (jlong)(__bridge_retained void*) g_sharedDevice;
     }
 }
 
 // =========================================================================
 // compileLibrary
-//   Java: MetalNative.compileLibrary(long device, String src, String name)
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
@@ -76,9 +75,6 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
 
 // =========================================================================
 // buildPostPipeline
-//   Java: MetalNative.buildPostPipeline(long device, long library,
-//                                       String vertName, String fragName,
-//                                       int colorFmt, int depthFmt)
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
@@ -118,7 +114,6 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     desc.colorAttachments[0].pixelFormat = (MTLPixelFormat) colorFormat;
     desc.colorAttachments[0].blendingEnabled = NO;
 
-    // 深度格式处理
     if (depthFormat == 55) {
         desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     } else if (depthFormat == 0) {
@@ -145,10 +140,6 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
 
 // =========================================================================
 // dispatchFullscreen
-//   Java: MetalNative.dispatchFullscreen(long cmd, long pipe,
-//                                        long colorSrc, long depthSrc,
-//                                        long normalSrc, long colorDst,
-//                                        long uniform, long uniformSize)
 // =========================================================================
 JNIEXPORT jint JNICALL
 Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
@@ -168,8 +159,26 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 
     if (!cmd || !pipe || !colorSrc || !depthSrc || !colorDst) return 1;
 
+    // 检测纹理读写冲突：如果源和目标是同一个纹理，需要使用临时纹理
+    // 否则 Metal 会禁止这种情况（Render Target Feedback Loop）
+    id<MTLTexture> actualDst = colorDst;
+    bool needsBlitBack = false;
+    MTLTextureDescriptor* texDesc = nil;
+    id<MTLTexture> tempTex = nil;
+
+    if (colorSrc == colorDst) {
+        // 创建临时纹理
+        texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorDst.pixelFormat
+                                                                    width:colorDst.width
+                                                                   height:colorDst.height
+                                                                mipmapped:NO];
+        tempTex = [g_sharedDevice newTextureWithDescriptor:texDesc];
+        actualDst = tempTex;
+        needsBlitBack = true;
+    }
+
     MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
-    desc.colorAttachments[0].texture = colorDst;
+    desc.colorAttachments[0].texture = actualDst;
     desc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     desc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
@@ -186,12 +195,26 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     }
     [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [enc endEncoding];
+
+    // 如果使用了临时纹理，需要拷贝回目标纹理
+    if (needsBlitBack && tempTex != nil) {
+        id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
+        [blitEnc copyFromTexture:tempTex
+                     sourceSlice:0
+                     sourceLevel:0
+                       toTexture:colorDst
+                destinationSlice:0
+                destinationLevel:0
+                      sliceCount:1
+                      levelCount:1];
+        [blitEnc endEncoding];
+    }
+
     return 0;
 }
 
 // =========================================================================
 // createBuffer
-//   Java: MetalNative.createBuffer(long device, byte[] data, long size)
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_createBuffer(
@@ -211,87 +234,8 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 
 // =========================================================================
 // release
-//   Java: MetalNative.release(long handle)
 // =========================================================================
 JNIEXPORT void JNICALL
 Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv*, jclass, jlong handle) {
     if (!handle) return;
-    id obj = (__bridge_transfer id)(void*) handle;
-    (void) obj;
-}
-
-// =========================================================================
-// ★ 新增：getMetalTextureFromGLTexture
-//   Java: MetalNative.getMetalTextureFromGLTexture(int textureId)
-//   目前为存根实现，因为无法直接从 OpenGL 纹理 ID 获取 Metal 纹理句柄。
-//   此处返回 0，表示无效句柄。
-// =========================================================================
-JNIEXPORT jlong JNICALL
-Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(
-    JNIEnv* env, jclass, jint textureId) {
-
-    if (textureId <= 0) return 0LL;
-
-    // 警告：此功能需要底层图形库（如 ANGLE / MobileGlues）提供扩展支持。
-    // 当前 iOS 上无法通过标准的 OpenGL ES API 获取 Metal 纹理句柄。
-    // 返回 0 表示无效。
-    NSLog(@"[MetallumShaders] getMetalTextureFromGLTexture(%d) called - unsupported, returning 0", textureId);
-    return 0LL;
-}
-
-// =========================================================================
-// ★ 新增：getDefaultCommandQueue
-//   Java: MetalNative.getDefaultCommandQueue()
-// =========================================================================
-JNIEXPORT jlong JNICALL
-Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(
-    JNIEnv* env, jclass) {
-
-    @autoreleasepool {
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (!device) return 0LL;
-
-        id<MTLCommandQueue> queue = [device newCommandQueue];
-        return (jlong)(__bridge_retained void*)queue;
-    }
-}
-
-// =========================================================================
-// ★ 新增：createCommandBuffer
-//   Java: MetalNative.createCommandBuffer()
-// =========================================================================
-JNIEXPORT jlong JNICALL
-Java_com_metallum_shaders_jni_MetalNative_createCommandBuffer(
-    JNIEnv* env, jclass) {
-
-    @autoreleasepool {
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if (!device) return 0LL;
-
-        id<MTLCommandQueue> queue = [device newCommandQueue];
-        id<MTLCommandBuffer> buffer = [queue commandBuffer];
-        return (jlong)(__bridge_retained void*)buffer;
-    }
-}
-
-// =========================================================================
-// ★★★ 新增：commitCommandBuffer ★★★
-//   Java: MetalNative.commitCommandBuffer(long cmdBufferHandle)
-//   提交命令缓冲区，让 GPU 真正执行渲染指令！
-// =========================================================================
-JNIEXPORT void JNICALL
-Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(
-    JNIEnv* env, jclass, jlong cmdBufferHandle) {
-    
-    if (cmdBufferHandle == 0) return;
-
-    // 1. 转换句柄为 MTLCommandBuffer 对象
-    id<MTLCommandBuffer> cmdBuffer = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
-    
-    // 2. 提交命令缓冲区
-    if (cmdBuffer != nil) {
-        [cmdBuffer commit];
-    }
-}
-
-} // extern "C"
+    id
