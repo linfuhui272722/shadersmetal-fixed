@@ -3,7 +3,6 @@ package com.metallum.shaders.client.mixin;
 import com.metallum.shaders.metal.MetalBridge;
 import com.metallum.shaders.shader.ShaderManager;
 import com.metallum.shaders.jni.MetalNative;
-import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
@@ -24,6 +23,12 @@ public abstract class GameRendererMixin {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/Mixin");
     private static int frameCounter = 0;
+
+    // ★★★ 优化：复用 Matrix 对象，避免每帧创建新对象导致 GC 卡顿 ★★★
+    private static final Matrix4f cachedViewProj = new Matrix4f();
+    private static final Matrix4f cachedInvViewProj = new Matrix4f();
+    private static final Matrix4f tempProjection = new Matrix4f();
+    private static final Matrix4f tempView = new Matrix4f();
 
     // 辅助方法：将 Matrix4f 写入 ByteBuffer
     private static void putMatrix(ByteBuffer buf, Matrix4f mat) {
@@ -47,9 +52,9 @@ public abstract class GameRendererMixin {
 
     @Inject(method = "render", at = @At("RETURN"))
     private void metallum_shaders$postRender(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo ci) {
-        ShaderManager.init();
+        // 仅在必要时初始化
         if (!ShaderManager.isAvailable()) return;
-
+        
         long pipeline = ShaderManager.getPipeline("composite");
         if (pipeline == 0L) return;
 
@@ -62,7 +67,8 @@ public abstract class GameRendererMixin {
 
         if (colorSrc <= 0) return;
 
-        if (frameCounter % 60 == 0) {
+        // 减少日志输出频率，避免 IO 卡顿
+        if (frameCounter % 300 == 0) { // 从 60 改为 300
              LOGGER.info("[MetallumMixins] Rendering frame...");
         }
         frameCounter++;
@@ -70,10 +76,11 @@ public abstract class GameRendererMixin {
         long colorDst = colorSrc;
         
         Minecraft mc = Minecraft.getInstance();
-        if (mc.level == null) return; // 安全检查
+        // ★★★ 修复：如果世界未加载，直接返回，避免空指针或无效渲染 ★★★
+        if (mc.level == null) return;
         
         Camera camera = MetalBridge.getMainCamera();
-        if (camera == null) return; // 安全检查
+        if (camera == null) return;
         
         int width = mc.getWindow().getWidth();
         int height = mc.getWindow().getHeight();
@@ -83,49 +90,40 @@ public abstract class GameRendererMixin {
         // ==========================================
         ByteBuffer uniformData = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder());
 
-        // --- 获取矩阵 ---
-        // 尝试从 RenderSystem 获取投影矩阵 (如果在世界渲染之后还是有效的)
-        // 注意：此时可能处于 GUI 渲染阶段，矩阵可能是正交投影。
-        // 我们优先尝试构建一个基于视角的标准透视投影矩阵。
-        
-        Matrix4f viewProj = new Matrix4f();
-        Matrix4f invViewProj = new Matrix4f();
-        
+        // --- 获取矩阵 (优化版) ---
+        // 清空临时矩阵以复用
         try {
-            // 1. 基础投影 (假设 FOV 70度)
-            float fov = 70.0f;
+            // 使用固定的 FOV 70 度，避免调用 mc.gameRenderer.getFov 导致的不稳定
+            float fov = 70.0f; 
             float aspect = (float) width / height;
             float near = 0.05f;
             float far = 1000.0f;
             
-            // 构建投影矩阵
-            Matrix4f projection = new Matrix4f().perspective((float) Math.toRadians(fov), aspect, near, far);
-            
-            // 构建视图矩阵 (仅包含相机位置偏移，忽略旋转以防止因数据错误导致的完全黑屏)
-            // 如果你能获取到 Rotation，请加上。目前仅 Translation。
-            Matrix4f view = new Matrix4f().translation(
+            // 复用静态对象，避免 new Matrix4f
+            tempProjection.identity().perspective((float) Math.toRadians(fov), aspect, near, far);
+            tempView.identity().translation(
                 -(float)camera.position().x, 
                 -(float)camera.position().y, 
                 -(float)camera.position().z
             );
             
-            // viewProj = Projection * View
-            projection.mul(view, viewProj);
+            // 计算 ViewProj
+            tempProjection.mul(tempView, cachedViewProj);
             
             // 计算逆矩阵
-            viewProj.invert(invViewProj);
+            cachedViewProj.invert(cachedInvViewProj);
             
         } catch (Exception e) {
-            LOGGER.warn("[MetallumShaders] Matrix calculation failed, using identity. " + e.getMessage());
-            viewProj.identity();
-            invViewProj.identity();
+            // 出错时使用单位矩阵，防止崩溃
+            cachedViewProj.identity();
+            cachedInvViewProj.identity();
         }
 
         // --- Offset 0: viewProj (mat4) ---
-        putMatrix(uniformData, viewProj);
+        putMatrix(uniformData, cachedViewProj);
 
         // --- Offset 64: invViewProj (mat4) ---
-        putMatrix(uniformData, invViewProj);
+        putMatrix(uniformData, cachedInvViewProj);
 
         // --- Offset 128: cameraPos (float4) ---
         uniformData.putFloat((float) camera.position().x);
@@ -171,7 +169,6 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(0);
 
         // --- Offset 272: lights[16] (Pad to 784 bytes) ---
-        // 确保 Buffer 大小足够
         int currentPos = uniformData.position();
         int targetSize = 784;
         if (currentPos < targetSize) {
@@ -184,15 +181,15 @@ public abstract class GameRendererMixin {
         uniformData.get(uniformBytes);
 
         long device = MetalBridge.getDeviceHandle();
-        long uniformBuffer = 0;
         
         try {
-            uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
+            long uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
 
             int result = MetalNative.dispatchFullscreen(
                 cmdBuffer, pipeline, colorSrc, depthSrc, normalSrc, colorDst, uniformBuffer, uniformBytes.length
             );
             
+            // 只有错误时才打印日志
             if (result != 0) LOGGER.error("[MetallumMixins] dispatchFullscreen error: {}", result);
             
             MetalNative.commitCommandBuffer(cmdBuffer);
