@@ -99,7 +99,7 @@ JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
     JNIEnv *env, jclass clazz, jlong deviceHandle, jlong libraryHandle,
     jstring vertexNameJ, jstring fragmentNameJ,
-    jint colorFormat, jint depthFormat) {
+    jint colorFormat, jint blendMode) {
 
     @autoreleasepool {
         id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
@@ -124,11 +124,16 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
         desc.vertexFunction = vfn;
         desc.fragmentFunction = ffn;
         desc.colorAttachments[0].pixelFormat = (MTLPixelFormat) colorFormat;
-        desc.colorAttachments[0].blendingEnabled = NO;
-
-        if (depthFormat == 55) desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
-        else if (depthFormat == 0) desc.depthAttachmentPixelFormat = MTLPixelFormatInvalid;
-        else desc.depthAttachmentPixelFormat = (MTLPixelFormat) depthFormat;
+        
+        // 根据 blendMode 设置混合状态
+        if (blendMode == 0) {
+            desc.colorAttachments[0].blendingEnabled = NO;
+        } else {
+            desc.colorAttachments[0].blendingEnabled = YES;
+            desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            desc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+        }
 
         NSError* err = nil;
         id<MTLRenderPipelineState> pipe = [device newRenderPipelineStateWithDescriptor:desc error:&err];
@@ -147,9 +152,8 @@ JNIEXPORT jint JNICALL
 Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     JNIEnv *env, jclass clazz, jlong cmdBufferHandle, jlong pipelineHandle,
     jlong colorSrcHandle, jlong depthSrcHandle, jlong normalSrcHandle, 
-    jlong colorDstHandle, jlong uniformBufferHandle, jlong uniformSize) {
+    jlong colorDstHandle, jlong uniformBufferHandle, jint uniformSize) {
 
-    // ★★★ 关键修复：必须使用 autoreleasepool ★★★
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
         id<MTLRenderPipelineState> pipe = (__bridge id<MTLRenderPipelineState>)(void*) pipelineHandle;
@@ -193,8 +197,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 
         MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
         desc.colorAttachments[0].texture = actualDst;
-        // ★★★ 修复闪烁：使用 Clear 替代 DontCare，防止显示垃圾数据 ★★★
-        desc.colorAttachments[0].loadAction = MTLLoadActionClear; 
+        desc.colorAttachments[0].loadAction = MTLLoadActionClear;
         desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
         desc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
@@ -223,7 +226,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                               sliceCount:1 levelCount:1];
             [blitEnc endEncoding];
         }
-    } // End autoreleasepool
+    } 
 
     return 0;
 }
@@ -233,7 +236,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_createBuffer(
-    JNIEnv *env, jclass clazz, jlong deviceHandle, jbyteArray dataJ, jlong size) {
+    JNIEnv *env, jclass clazz, jlong deviceHandle, jbyteArray dataJ, jint size) {
 
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
     if (!device || !dataJ) return 0;
@@ -272,15 +275,76 @@ Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv *env, jclas
 }
 
 // =========================================================================
+// 新增：纹理管理方法
+// =========================================================================
+
+JNIEXPORT jlong JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_createTexture(JNIEnv *env, jclass clazz, jlong deviceHandle, jint width, jint height, jint format) {
+    @autoreleasepool {
+        id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
+        if (!device) return 0;
+
+        MTLPixelFormat pixelFormat = MTLPixelFormatBGRA8Unorm; // 默认
+        if (format == 1) pixelFormat = MTLPixelFormatRGBA16Float;
+        
+        MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
+                                                                                        width:(NSUInteger)width
+                                                                                       height:(NSUInteger)height
+                                                                                    mipmapped:NO];
+        desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        desc.storageMode = MTLStorageModePrivate;
+        
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        return (jlong)(__bridge_retained void*) texture;
+    }
+}
+
+JNIEXPORT void JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_destroyTexture(JNIEnv *env, jclass clazz, jlong textureHandle) {
+    @autoreleasepool {
+        if (textureHandle) {
+            id<MTLTexture> texture = (__bridge_transfer id<MTLTexture>)(void*) textureHandle;
+            texture = nil; // ARC will release
+        }
+    }
+}
+
+JNIEXPORT void JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_blitTexture(JNIEnv *env, jclass clazz, jlong cmdBufferHandle, jlong srcHandle, jlong dstHandle, jint width, jint height) {
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
+        id<MTLTexture> src = (__bridge id<MTLTexture>)(void*) srcHandle;
+        id<MTLTexture> dst = (__bridge id<MTLTexture>)(void*) dstHandle;
+        
+        if (!cmd || !src || !dst) return;
+        
+        id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
+        [blitEnc copyFromTexture:src 
+                      sourceSlice:0 
+                      sourceLevel:0 
+                       sourceOrigin:MTLOriginMake(0, 0, 0) 
+                         sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, 1) 
+                          toTexture:dst 
+                 destinationSlice:0 
+                 destinationLevel:0 
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blitEnc endEncoding];
+    }
+}
+
+// =========================================================================
 // 其他方法
 // =========================================================================
 JNIEXPORT void JNICALL
 Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv *env, jclass clazz, jlong handle) {
+    // 由于我们使用了 ARC，这个方法可以留空
+    // 如果确定要立即释放，可以调用 CFRelease，但 ARC 会自动管理
 }
 
-JNIEXPORT jlong JNICALL 
-Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(JNIEnv *env, jclass clazz, jint textureId) {
-    return 0LL;
+JNIEXPORT void JNICALL
+Java_com_metallum_shaders_jni_MetalNative_releaseBuffer(JNIEnv *env, jclass clazz, jlong handle) {
+    // 同上，缓冲区由 ARC 管理，或者我们可以显式释放
+    // 这里我们不做任何操作，让 ARC 去管理
 }
 
 JNIEXPORT jlong JNICALL 
