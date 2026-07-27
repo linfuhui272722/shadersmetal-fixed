@@ -104,6 +104,9 @@ public abstract class GameRendererMixin {
         // ★★★ 关键修复：提交命令缓冲区到 GPU ★★★
         // 只有提交后，GPU 才会真正执行着色器渲染
         MetalNative.commitCommandBuffer(cmdBuffer);
+        
+        // ★ 建议：释放命令缓冲区资源（防止内存泄漏）
+        MetalNative.release(cmdBuffer);
     }
 
     @Inject(method = "close", at = @At("RETURN"))
