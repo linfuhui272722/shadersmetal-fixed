@@ -13,8 +13,8 @@ fragment float4 composite_fragment(
     texture2d<float, access::sample> colorTex [[texture(0)]],
     depth2d<float, access::sample>   depthTex [[texture(1)]],
     constant Uniforms& u [[buffer(0)]],
-    sampler smp [[sampler(0)])
-{
+    sampler smp [[sampler(0)]] // <--- 修正：这里必须是双括号 ]]
+) {
     // 修复：翻转 UV，因为 Minecraft 传递的是 OpenGL 纹理坐标系
     float2 uv = in.uv;
     uv.y = 1.0 - uv.y;
