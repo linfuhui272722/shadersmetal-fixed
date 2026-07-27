@@ -31,9 +31,9 @@ public abstract class GameRendererMixin {
         long pipeline = ShaderManager.getPipeline("composite");
         if (pipeline == 0L) return;
 
-        // ★★★ 修复：创建我们自己的命令缓冲区，不与游戏共用，解决卡死问题 ★★★
+        // 1. 创建独立的命令缓冲区，避免与游戏主循环冲突
         long cmdBuffer = MetalNative.createCommandBuffer();
-        if (cmdBuffer <= 0) return; // 创建失败则跳过
+        if (cmdBuffer <= 0) return;
 
         long colorSrc  = MetalBridge.getMainColorTextureHandle();
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
@@ -51,6 +51,7 @@ public abstract class GameRendererMixin {
         int width = Minecraft.getInstance().getWindow().getWidth();
         int height = Minecraft.getInstance().getWindow().getHeight();
         
+        // 2. 准备 Uniform 数据
         ByteBuffer uniformData = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         uniformData.putFloat(System.currentTimeMillis() / 1000.0f);
         uniformData.putFloat(width);
@@ -70,10 +71,12 @@ public abstract class GameRendererMixin {
         uniformData.get(uniformBytes);
 
         long device = MetalBridge.getDeviceHandle();
-        long uniformBuffer = 0;
         
+        // 3. 执行渲染
         try {
-            uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
+            // 每帧创建新的 Uniform Buffer (体积很小，几十字节，开销可忽略)
+            // 这样可以避免 CPU/GPU 读写冲突，解决闪烁问题
+            long uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
 
             int result = MetalNative.dispatchFullscreen(
                 cmdBuffer, pipeline, colorSrc, depthSrc, normalSrc, colorDst, uniformBuffer, uniformBytes.length
@@ -81,7 +84,12 @@ public abstract class GameRendererMixin {
             
             if (result != 0) LOGGER.error("[MetallumMixins] dispatchFullscreen error: {}", result);
             
+            // 提交命令到 GPU
             MetalNative.commitCommandBuffer(cmdBuffer);
+            
+            // ★★★ 关键修复：绝对不要在这里 release uniformBuffer！★★★
+            // GPU 是异步工作的，如果现在释放，GPU 会读取到已销毁的内存 (闪烁/卡死)
+            
         } catch (Exception e) {
             LOGGER.error("[MetallumMixins] Exception during render", e);
         }
