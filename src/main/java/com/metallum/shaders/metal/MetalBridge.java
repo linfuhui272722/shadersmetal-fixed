@@ -82,6 +82,7 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetColorTextureHandle();
+            LOGGER.info("getMainColorTextureHandle returned 0x{}", Long.toHexString(handle));
             if (handle <= 0x1000) {
                 LOGGER.debug("Color texture handle {} is invalid (<= 0x1000), skipping", handle);
                 return -1L;
@@ -90,7 +91,6 @@ public final class MetalBridge {
                 return cachedColorTextureHandle;
             }
             cachedColorTextureHandle = handle;
-            LOGGER.debug("Color texture handle: 0x{}", Long.toHexString(handle));
             return handle;
 
         } catch (Throwable t) {
@@ -104,6 +104,7 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetDepthTextureHandle();
+            LOGGER.info("getMainDepthTextureHandle returned 0x{}", Long.toHexString(handle));
             if (handle <= 0x1000) {
                 LOGGER.debug("Depth texture handle {} is invalid (<= 0x1000), skipping", handle);
                 return -1L;
@@ -113,7 +114,6 @@ public final class MetalBridge {
                 return cachedDepthTextureHandle;
             }
             cachedDepthTextureHandle = handle;
-            LOGGER.debug("Depth texture handle: 0x{}", Long.toHexString(handle));
             return handle;
 
         } catch (Throwable t) {
@@ -254,14 +254,16 @@ public final class MetalBridge {
             if (nativeHandle != null) {
                 long addr = extractMemorySegmentAddress(nativeHandle);
                 if (addr > 0x1000) {
-                    LOGGER.debug("Extracted handle 0x{} from nativeHandle field", Long.toHexString(addr));
+                    LOGGER.info("Extracted handle 0x{} from nativeHandle field", Long.toHexString(addr));
                     return addr;
+                } else {
+                    LOGGER.warn("Extracted address {} from nativeHandle is not valid", addr);
                 }
             }
         } catch (NoSuchFieldException e) {
-            // 如果没有 nativeHandle，继续尝试
+            LOGGER.warn("No nativeHandle field found in {}", clazz.getName());
         } catch (Throwable t) {
-            LOGGER.debug("Failed to access nativeHandle: {}", t.getMessage());
+            LOGGER.warn("Failed to access nativeHandle: {}", t.getMessage());
         }
 
         // 2. 尝试调用可能返回 MemorySegment 或 Long 的方法
@@ -274,13 +276,13 @@ public final class MetalBridge {
                         if (result.getClass().getName().contains("MemorySegment")) {
                             long addr = extractMemorySegmentAddress(result);
                             if (addr > 0x1000) {
-                                LOGGER.debug("Extracted handle 0x{} via method {}", Long.toHexString(addr), m.getName());
+                                LOGGER.info("Extracted handle 0x{} via method {}", Long.toHexString(addr), m.getName());
                                 return addr;
                             }
                         } else if (result instanceof Long || result instanceof Number) {
                             long val = ((Number) result).longValue();
                             if (val > 0x1000) {
-                                LOGGER.debug("Extracted handle 0x{} via method {}", Long.toHexString(val), m.getName());
+                                LOGGER.info("Extracted handle 0x{} via method {}", Long.toHexString(val), m.getName());
                                 return val;
                             }
                         }
@@ -290,8 +292,6 @@ public final class MetalBridge {
         }
 
         // 3. 遍历所有字段（跳过 views, device, mtlPixelFormat 等）
-        //    如果仍未找到，打印诊断信息（仅一次）
-        long lastResort = -1L;
         for (Field f : clazz.getDeclaredFields()) {
             String name = f.getName();
             if ("views".equals(name) || "device".equals(name) || "mtlPixelFormat".equals(name)) {
@@ -304,13 +304,13 @@ public final class MetalBridge {
                     if (val.getClass().getName().contains("MemorySegment")) {
                         long addr = extractMemorySegmentAddress(val);
                         if (addr > 0x1000) {
-                            LOGGER.debug("Extracted handle 0x{} from field {}", Long.toHexString(addr), name);
+                            LOGGER.info("Extracted handle 0x{} from field {}", Long.toHexString(addr), name);
                             return addr;
                         }
                     } else if (val instanceof Long || val instanceof Number) {
                         long num = ((Number) val).longValue();
                         if (num > 0x1000) {
-                            LOGGER.debug("Extracted handle 0x{} from field {}", Long.toHexString(num), name);
+                            LOGGER.info("Extracted handle 0x{} from field {}", Long.toHexString(num), name);
                             return num;
                         }
                     }
@@ -347,23 +347,36 @@ public final class MetalBridge {
             Object result = addressMethod.invoke(segmentObj);
             if (result instanceof Long) {
                 long addr = (Long) result;
-                if (addr > 0) return addr;
+                if (addr > 0) {
+                    LOGGER.info("MemorySegment address via method = 0x{}", Long.toHexString(addr));
+                    return addr;
+                }
             } else if (result instanceof Number) {
                 long addr = ((Number) result).longValue();
-                if (addr > 0) return addr;
+                if (addr > 0) {
+                    LOGGER.info("MemorySegment address via method = 0x{}", Long.toHexString(addr));
+                    return addr;
+                }
             }
         } catch (Throwable t) {
-            // 如果 address() 失败，尝试直接访问 address 字段（备选）
+            LOGGER.warn("Failed to get address from MemorySegment via method: {}", t.getMessage());
+            // 尝试直接访问 address 字段
             try {
                 Field addrField = segmentObj.getClass().getDeclaredField("address");
                 addrField.setAccessible(true);
                 Object val = addrField.get(segmentObj);
                 if (val instanceof Long) {
                     long addr = (Long) val;
-                    if (addr > 0) return addr;
+                    if (addr > 0) {
+                        LOGGER.info("MemorySegment address via field = 0x{}", Long.toHexString(addr));
+                        return addr;
+                    }
                 } else if (val instanceof Number) {
                     long addr = ((Number) val).longValue();
-                    if (addr > 0) return addr;
+                    if (addr > 0) {
+                        LOGGER.info("MemorySegment address via field = 0x{}", Long.toHexString(addr));
+                        return addr;
+                    }
                 }
             } catch (Throwable ignored) {}
         }
@@ -377,12 +390,12 @@ public final class MetalBridge {
                 try {
                     renderTargetField = GameRenderer.class.getDeclaredField("mainRenderTarget");
                     renderTargetField.setAccessible(true);
-                    LOGGER.debug("Found mainRenderTarget field in GameRenderer");
+                    LOGGER.info("Found mainRenderTarget field in GameRenderer");
                 } catch (NoSuchFieldException ignored) {
                     try {
                         renderTargetField = GameRenderer.class.getDeclaredField("renderTarget");
                         renderTargetField.setAccessible(true);
-                        LOGGER.debug("Found renderTarget field in GameRenderer");
+                        LOGGER.info("Found renderTarget field in GameRenderer");
                     } catch (NoSuchFieldException ignored2) {
                         LOGGER.error("Cannot find RenderTarget field in GameRenderer");
                     }
