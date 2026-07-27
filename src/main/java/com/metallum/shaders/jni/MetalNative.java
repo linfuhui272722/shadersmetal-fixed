@@ -36,4 +36,11 @@ public final class MetalNative {
 
     // ---------- ★ 新增：命令缓冲 ----------
     public static native long createCommandBuffer();
+
+    // ★★★ 新增方法：提交命令缓冲区 ★★★
+    /**
+     * 将已编码的命令缓冲区提交到 GPU 队列执行。
+     * 这是让着色器生效的关键步骤。
+     */
+    public static native void commitCommandBuffer(long cmdBufferHandle);
 }
