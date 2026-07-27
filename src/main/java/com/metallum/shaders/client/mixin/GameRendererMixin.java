@@ -12,16 +12,11 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 @Mixin(GameRenderer.class)
 public abstract class GameRendererMixin {
-
-    // 懒加载缓存，避免类加载时崩溃
-    private static Field cameraField;
-    private static boolean cameraFieldInitialized = false;
 
     /**
      * 核心渲染注入点。
@@ -36,7 +31,7 @@ public abstract class GameRendererMixin {
             return;
         }
 
-        // 2. 获取管线 (Shader)
+        // 2. 获取管线
         long pipeline = ShaderManager.getPipeline("composite");
         if (pipeline == 0L) return;
 
@@ -46,7 +41,6 @@ public abstract class GameRendererMixin {
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
-        // ★ 修复：如果句柄无效（<=0），提前返回，避免 Native 崩溃
         if (cmdBuffer <= 0 || colorSrc <= 0) {
             return;
         }
@@ -65,18 +59,17 @@ public abstract class GameRendererMixin {
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // ★ 通过懒加载反射获取 Camera
-        Camera camera = getCamera();
-        if (camera != null) {
-            uniformData.putFloat((float) camera.position().x);
-            uniformData.putFloat((float) camera.position().y);
-            uniformData.putFloat((float) camera.position().z);
-        } else {
-            // 如果 camera 为空，填充默认值
-            uniformData.putFloat(0.0f);
-            uniformData.putFloat(0.0f);
-            uniformData.putFloat(0.0f);
+        // ★★★ 核心修复：使用 MetalBridge.getMainCamera() 获取相机 ★★★
+        Camera camera = MetalBridge.getMainCamera();
+        if (camera == null) {
+            // 如果无法获取相机，直接返回，不再执行后续渲染
+            return; 
         }
+
+        // 填充相机坐标
+        uniformData.putFloat((float) camera.position().x);
+        uniformData.putFloat((float) camera.position().y);
+        uniformData.putFloat((float) camera.position().z);
         
         uniformData.flip();
 
@@ -101,44 +94,6 @@ public abstract class GameRendererMixin {
         
         if (result != 0) {
              System.err.println("[MetallumShaders] dispatchFullscreen failed with code: " + result);
-        }
-    }
-
-    /**
-     * 懒加载反射获取 Minecraft.camera 字段
-     */
-    private Camera getCamera() {
-        if (!cameraFieldInitialized) {
-            synchronized (GameRendererMixin.class) {
-                if (!cameraFieldInitialized) {
-                    try {
-                        // 尝试通过反射获取 Minecraft.camera 字段
-                        cameraField = Minecraft.class.getDeclaredField("camera");
-                        cameraField.setAccessible(true);
-                    } catch (NoSuchFieldException e) {
-                        System.err.println("[MetallumShaders] Failed to find camera field in Minecraft: " + e.getMessage());
-                        // 可尝试备选字段名
-                        try {
-                            cameraField = Minecraft.class.getDeclaredField("field_175622"); // 中间映射备选
-                            cameraField.setAccessible(true);
-                            System.err.println("[MetallumShaders] Found field via fallback name 'field_175622'");
-                        } catch (NoSuchFieldException ex) {
-                            System.err.println("[MetallumShaders] Fallback failed too: " + ex.getMessage());
-                        }
-                    }
-                    cameraFieldInitialized = true;
-                }
-            }
-        }
-
-        if (cameraField == null) {
-            return null;
-        }
-        try {
-            return (Camera) cameraField.get(Minecraft.getInstance());
-        } catch (IllegalAccessException e) {
-            System.err.println("[MetallumShaders] Failed to get camera via reflection: " + e.getMessage());
-            return null;
         }
     }
 
