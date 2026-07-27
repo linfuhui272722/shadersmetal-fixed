@@ -31,7 +31,9 @@ public abstract class GameRendererMixin {
         long pipeline = ShaderManager.getPipeline("composite");
         if (pipeline == 0L) return;
 
-        long cmdBuffer = MetalBridge.getCurrentCommandBufferHandle();
+        // ★★★ 修复：创建我们自己的命令缓冲区，不与游戏共用 ★★★
+        long cmdBuffer = MetalNative.createCommandBuffer();
+        
         long colorSrc  = MetalBridge.getMainColorTextureHandle();
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
@@ -43,7 +45,7 @@ public abstract class GameRendererMixin {
         }
         frameCounter++;
 
-        long colorDst = colorSrc;
+        long colorDst = colorSrc; 
         
         int width = Minecraft.getInstance().getWindow().getWidth();
         int height = Minecraft.getInstance().getWindow().getHeight();
@@ -79,9 +81,8 @@ public abstract class GameRendererMixin {
             if (result != 0) LOGGER.error("[MetallumMixins] dispatchFullscreen error: {}", result);
             
             MetalNative.commitCommandBuffer(cmdBuffer);
-        } finally {
-            // ★★★ 修复：移除 release 调用。我们现在复用全局 Buffer，不需要每帧释放。 ★★★
-            // 如果这里释放，GPU 还在读取，会导致卡死/黑屏。
+        } catch (Exception e) {
+            LOGGER.error("[MetallumMixins] Exception during render", e);
         }
     }
 
