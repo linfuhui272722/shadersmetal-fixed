@@ -26,8 +26,8 @@ static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
 static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
 
-// 三重缓冲
-#define BUFFER_COUNT 10
+// 三重缓冲 - 增加到 30 以防止 GPU/CPU 同步问题导致的卡死
+#define BUFFER_COUNT 30
 static id<MTLBuffer> g_uniformBuffers[BUFFER_COUNT] = { nil };
 static NSUInteger g_currentBufferIndex = 0;
 
@@ -167,13 +167,18 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
         id<MTLTexture> actualDst = colorDst;
         bool needsBlit = false;
 
+        // --- 处理读写冲突 ---
         if (colorSrc == colorDst) {
             needsBlit = true;
             
+            // 检查缓存是否有效
             if (g_cachedTempTexture == nil || 
                 g_cachedWidth != colorDst.width || 
                 g_cachedHeight != colorDst.height ||
                 g_cachedFormat != colorDst.pixelFormat) {
+                
+                // 释放旧纹理
+                // g_cachedTempTexture = nil; // ARC 会自动处理
                 
                 MTLTextureDescriptor* texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorDst.pixelFormat
                                                                                                     width:colorDst.width
@@ -187,7 +192,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                     g_cachedWidth = colorDst.width;
                     g_cachedHeight = colorDst.height;
                     g_cachedFormat = colorDst.pixelFormat;
-                    NSLog(@"[MetallumShaders] Created cached temp texture (Private): %lu x %lu", (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight);
+                    NSLog(@"[MetallumShaders] Created cached temp texture (Private): %lu x %lu, Format: %u", (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight, (unsigned int)g_cachedFormat);
                 }
             }
             
@@ -195,8 +200,10 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
             if (!actualDst) return 1;
         }
 
+        // --- 配置 Render Pass ---
         MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
         desc.colorAttachments[0].texture = actualDst;
+        // Clear 为黑色是安全的，因为我们会完全覆盖它
         desc.colorAttachments[0].loadAction = MTLLoadActionClear;
         desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
         desc.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -219,11 +226,19 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
 
+        // --- 如果使用了临时纹理，把结果复制回去 ---
         if (needsBlit && g_cachedTempTexture != nil) {
             id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
-            [blitEnc copyFromTexture:g_cachedTempTexture sourceSlice:0 sourceLevel:0
-                             toTexture:colorDst destinationSlice:0 destinationLevel:0
-                              sliceCount:1 levelCount:1];
+            // 使用更详细的复制方法以确保兼容性
+            [blitEnc copyFromTexture:g_cachedTempTexture 
+                         sourceSlice:0 
+                         sourceLevel:0 
+                           sourceOrigin:MTLOriginMake(0, 0, 0) 
+                             sourceSize:MTLSizeMake(g_cachedWidth, g_cachedHeight, 1) 
+                              toTexture:colorDst 
+                       destinationSlice:0 
+                       destinationLevel:0 
+                      destinationOrigin:MTLOriginMake(0, 0, 0)];
             [blitEnc endEncoding];
         }
     } 
@@ -243,12 +258,14 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 
     NSUInteger bufferIndex = g_currentBufferIndex;
     const NSUInteger requiredSize = (NSUInteger)size;
-    const NSUInteger allocSize = 4096; 
+    // 对齐到 4096 以减少重新分配
+    const NSUInteger allocSize = ((requiredSize / 256) + 1) * 256; 
 
+    // 如果缓冲区不存在或太小，重新创建
     if (g_uniformBuffers[bufferIndex] == nil || 
         g_uniformBuffers[bufferIndex].length < requiredSize) {
         
-        g_uniformBuffers[bufferIndex] = nil;
+        g_uniformBuffers[bufferIndex] = nil; // ARC release
         g_uniformBuffers[bufferIndex] = [device newBufferWithLength:allocSize options:MTLResourceStorageModeShared];
     }
 
@@ -271,6 +288,7 @@ Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv *env, jclas
     if (!handle) return;
     id<MTLCommandBuffer> buf = (__bridge id<MTLCommandBuffer>)(void*) handle;
     [buf commit];
+    // 推进环形缓冲区索引
     g_currentBufferIndex = (g_currentBufferIndex + 1) % BUFFER_COUNT;
 }
 
