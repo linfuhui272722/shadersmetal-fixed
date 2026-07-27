@@ -18,14 +18,12 @@ extern "C" {
 // =========================================================================
 static id<MTLDevice> g_sharedDevice = nil;
 static id<MTLCommandQueue> g_sharedQueue = nil;
+
+// 缓存临时纹理
 static id<MTLTexture> g_cachedTempTexture = nil;
 static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
 static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
-
-// ★★★ 新增：全局 Uniform Buffer 缓存 ★★★
-static id<MTLBuffer> g_cachedUniformBuffer = nil;
-static NSUInteger g_cachedUniformBufferSize = 0;
 
 // =========================================================================
 // getDefaultDevice
@@ -116,7 +114,7 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
 }
 
 // =========================================================================
-// dispatchFullscreen (优化：显式标记纹理用途)
+// dispatchFullscreen (修复：纹理缓存 + 同步)
 // =========================================================================
 JNIEXPORT jint JNICALL
 Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
@@ -141,6 +139,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     if (colorSrc == colorDst) {
         needsBlit = true;
         
+        // 检查缓存纹理是否有效
         if (g_cachedTempTexture == nil || 
             g_cachedWidth != colorDst.width || 
             g_cachedHeight != colorDst.height ||
@@ -152,16 +151,16 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                                                                                                    height:colorDst.height
                                                                                                 mipmapped:NO];
                 
-                // ★★★ 关键修复：显式标记纹理用途，防止 GPU 拒绝写入 ★★★
+                // 关键：使用 Shared 模式以确保兼容性，标记 RenderTarget 用途
                 texDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-                texDesc.storageMode = MTLStorageModePrivate; 
+                texDesc.storageMode = MTLStorageModeShared; 
 
                 if (g_sharedDevice) {
                     g_cachedTempTexture = [g_sharedDevice newTextureWithDescriptor:texDesc];
                     g_cachedWidth = colorDst.width;
                     g_cachedHeight = colorDst.height;
                     g_cachedFormat = colorDst.pixelFormat;
-                    NSLog(@"[MetallumShaders] Created new cached temp texture with usage flags: %lu x %lu", (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight);
+                    NSLog(@"[MetallumShaders] Created cached temp texture (Shared): %lu x %lu", (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight);
                 }
             }
         }
@@ -199,7 +198,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 }
 
 // =========================================================================
-// createBuffer (优化：复用全局 Uniform Buffer)
+// createBuffer (修改：每帧创建新 Buffer，不复用，避免 CPU/GPU 竞争)
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_createBuffer(
@@ -208,33 +207,31 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
     if (!device || !dataJ) return 0;
 
-    // ★★★ 优化：如果缓存的 Buffer 大小足够，直接复用；否则重新创建 ★★★
-    if (g_cachedUniformBuffer == nil || g_cachedUniformBufferSize < (NSUInteger)size) {
-        NSUInteger newSize = (NSUInteger)size + 1024; // 预留空间
-        NSLog(@"[MetallumShaders] Creating new Uniform Buffer size: %lu", (unsigned long)newSize);
-        g_cachedUniformBuffer = [device newBufferWithLength:newSize options:MTLResourceStorageModeShared];
-        g_cachedUniformBufferSize = newSize;
-    }
-
-    // 将数据拷贝到缓存的 Buffer 中
     jbyte* data = env->GetByteArrayElements(dataJ, nullptr);
-    void* bufferContents = [g_cachedUniformBuffer contents];
-    memcpy(bufferContents, data, (size_t)size);
-    // [g_cachedUniformBuffer didModifyRange:NSMakeRange(0, size)]; // Shared模式通常不需要
-
+    
+    // ★★★ 安全修复：每帧创建新 Buffer ★★★
+    // 避免复用导致 CPU 写入时 GPU 正在读取上一帧数据 (闪烁)
+    // Uniform Buffer 很小 (几百字节)，不会造成内存压力
+    id<MTLBuffer> buf = [device newBufferWithBytes:data
+                                            length:(NSUInteger) size
+                                           options:MTLResourceStorageModeShared];
+    
+    // 确保数据对 CPU 和 GPU 可见 (Shared 模式必须)
+    // [buf didModifyRange:NSMakeRange(0, size)]; // Optional for Shared memory
+    
     env->ReleaseByteArrayElements(dataJ, data, JNI_ABORT);
 
-    return (jlong) (__bridge_retained void*) g_cachedUniformBuffer;
+    return (jlong) (__bridge_retained void*) buf;
 }
 
 // =========================================================================
-// release (修改：不释放全局资源)
+// release (修改：不做任何事)
 // =========================================================================
 JNIEXPORT void JNICALL
 Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv*, jclass, jlong handle) {
     if (!handle) return;
-    // 全局资源（Device, Queue, UniformBuffer）不应该被 release 释放
-    // 这里我们仅释放非全局资源，或者简单忽略。
+    // 全局资源（Device, Queue, cachedTex）不应该被释放
+    // 每帧的小 Buffer 由 ARC 自动回收，我们在这里不手动释放，防止释放过早导致崩溃
 }
 
 // =========================================================================
@@ -251,10 +248,4 @@ JNIEXPORT jlong JNICALL Java_com_metallum_shaders_jni_MetalNative_createCommandB
     return (jlong)(__bridge_retained void*) [g_sharedQueue commandBuffer];
 }
 
-JNIEXPORT void JNICALL Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv* env, jclass, jlong handle) {
-    if (!handle) return;
-    id<MTLCommandBuffer> buf = (__bridge id<MTLCommandBuffer>)(void*) handle;
-    [buf commit];
-}
-
-} // extern "C"
+JNIEXPORT void JNICALL Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv* 
