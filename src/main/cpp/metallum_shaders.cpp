@@ -274,4 +274,24 @@ Java_com_metallum_shaders_jni_MetalNative_createCommandBuffer(
     }
 }
 
+// =========================================================================
+// ★★★ 新增：commitCommandBuffer ★★★
+//   Java: MetalNative.commitCommandBuffer(long cmdBufferHandle)
+//   提交命令缓冲区，让 GPU 真正执行渲染指令！
+// =========================================================================
+JNIEXPORT void JNICALL
+Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(
+    JNIEnv* env, jclass, jlong cmdBufferHandle) {
+    
+    if (cmdBufferHandle == 0) return;
+
+    // 1. 转换句柄为 MTLCommandBuffer 对象
+    id<MTLCommandBuffer> cmdBuffer = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
+    
+    // 2. 提交命令缓冲区
+    if (cmdBuffer != nil) {
+        [cmdBuffer commit];
+    }
+}
+
 } // extern "C"
