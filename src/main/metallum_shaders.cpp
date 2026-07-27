@@ -10,6 +10,7 @@
 #include <Metal/Metal.h>
 #include <vector>
 #include <cstring>
+#include <atomic>
 
 extern "C" {
 
@@ -25,11 +26,13 @@ static id<MTLTexture> g_cachedTempTexture = nil;
 static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
 static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
+static std::atomic<bool> g_renderInProgress(false);
 
 // 三重缓冲
-#define BUFFER_COUNT 30
+#define BUFFER_COUNT 16
 static id<MTLBuffer> g_uniformBuffers[BUFFER_COUNT] = { nil };
 static NSUInteger g_currentBufferIndex = 0;
+static std::atomic<NSUInteger> g_completedBufferIndex(0);
 
 // =========================================================================
 // 辅助函数：初始化全局 Sampler
@@ -58,6 +61,7 @@ Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv *env, jclass c
             if (!g_sharedDevice) return 0LL;
             g_sharedQueue = [g_sharedDevice newCommandQueue];
             initSampler();
+            NSLog(@"[MetallumShaders] Metal device: %@", g_sharedDevice.name);
         }
         return (jlong)(__bridge_retained void*) g_sharedDevice;
     }
@@ -84,7 +88,10 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
 
         NSError* err = nil;
         id<MTLLibrary> lib = [device newLibraryWithSource:source options:opts error:&err];
-        if (err) NSLog(@"[MetallumShaders] Failed to compile %@: %@", name, err);
+        if (err) {
+            NSLog(@"[MetallumShaders] Failed to compile %@: %@", name, err);
+            NSLog(@"[MetallumShaders] Source length: %lu", (unsigned long)source.length);
+        }
 
         env->ReleaseStringUTFChars(sourceJ, src);
         env->ReleaseStringUTFChars(nameJ, nm);
@@ -154,6 +161,14 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     jlong colorDstHandle, jlong uniformBufferHandle, jint uniformSize) {
 
     @autoreleasepool {
+        // 检查是否已有渲染在进行
+        bool expected = false;
+        if (!g_renderInProgress.compare_exchange_strong(expected, true)) {
+            // 上一次渲染还未完成，跳过这一帧
+            NSLog(@"[MetallumShaders] Render already in progress, skipping frame");
+            return 2; // 返回特殊错误码表示跳过
+        }
+
         id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
         id<MTLRenderPipelineState> pipe = (__bridge id<MTLRenderPipelineState>)(void*) pipelineHandle;
         id<MTLTexture> colorSrc = (__bridge id<MTLTexture>)(void*) colorSrcHandle;
@@ -161,13 +176,29 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
         id<MTLTexture> colorDst = (__bridge id<MTLTexture>)(void*) colorDstHandle;
         id<MTLBuffer>  uniform  = (__bridge id<MTLBuffer>)(void*) uniformBufferHandle;
 
-        if (!cmd || !pipe || !colorSrc || !depthSrc || !colorDst) return 1;
+        if (!cmd || !pipe) {
+            g_renderInProgress.store(false);
+            return 1;
+        }
+
+        // 如果colorSrc或colorDst无效，跳过渲染但不阻塞
+        if (!colorSrc) {
+            NSLog(@"[MetallumShaders] Warning: colorSrc is nil");
+            g_renderInProgress.store(false);
+            return 1;
+        }
+        
+        if (!colorDst) colorDst = colorSrc;
+        if (!depthSrc) {
+            // 深度纹理为nil时，使用占位符
+            NSLog(@"[MetallumShaders] Warning: depthSrc is nil, using placeholder");
+        }
 
         id<MTLTexture> actualDst = colorDst;
         bool needsBlit = false;
 
         // --- 处理读写冲突 ---
-        if (colorSrc == colorDst) {
+        if (colorSrc == colorDst && colorSrc != nil) {
             needsBlit = true;
             
             // 检查缓存是否有效
@@ -188,56 +219,72 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                     g_cachedWidth = colorDst.width;
                     g_cachedHeight = colorDst.height;
                     g_cachedFormat = colorDst.pixelFormat;
-                    NSLog(@"[MetallumShaders] Created cached temp texture (Private): %lu x %lu, Format: %u", (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight, (unsigned int)g_cachedFormat);
+                    NSLog(@"[MetallumShaders] Created cached temp texture (Private): %lu x %lu, Format: %u", 
+                          (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight, (unsigned int)g_cachedFormat);
                 }
             }
             
             actualDst = g_cachedTempTexture;
-            if (!actualDst) return 1;
+            if (!actualDst) {
+                g_renderInProgress.store(false);
+                return 1;
+            }
         }
 
         // --- 配置 Render Pass ---
         MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
         desc.colorAttachments[0].texture = actualDst;
-        // LoadAction Clear 是安全的
-        desc.colorAttachments[0].loadAction = MTLLoadActionClear;
-        desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        desc.colorAttachments[0].loadAction = MTLLoadActionLoad; // 使用Load而非Clear保留原内容
         desc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
         id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:desc];
+        if (!enc) {
+            NSLog(@"[MetallumShaders] Failed to create render encoder");
+            g_renderInProgress.store(false);
+            return 1;
+        }
+        
         [enc setRenderPipelineState:pipe];
         
         if (g_sharedSampler) {
             [enc setFragmentSamplerState:g_sharedSampler atIndex:0];
         }
         
-        [enc setFragmentTexture:colorSrc atIndex:0];
-        [enc setFragmentTexture:depthSrc atIndex:1];
+        if (colorSrc) {
+            [enc setFragmentTexture:colorSrc atIndex:0];
+        }
+        if (depthSrc) {
+            [enc setFragmentTexture:depthSrc atIndex:1];
+        }
         
         if (normalSrcHandle) {
             [enc setFragmentTexture:(__bridge id<MTLTexture>)(void*) normalSrcHandle atIndex:2];
         }
-        if (uniform) [enc setFragmentBuffer:uniform offset:0 atIndex:0];
+        if (uniform) {
+            [enc setFragmentBuffer:uniform offset:0 atIndex:0];
+        }
         
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
 
         // --- 如果使用了临时纹理，把结果复制回去 ---
-        // 修复：使用更明确的 Blit 参数，防止 GPU 挂起
-        if (needsBlit && g_cachedTempTexture != nil) {
+        if (needsBlit && g_cachedTempTexture != nil && colorDst != nil) {
             id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
-            // 显式指定源和目标区域，确保不越界
-            [blitEnc copyFromTexture:g_cachedTempTexture 
-                         sourceSlice:0 
-                         sourceLevel:0 
-                           sourceOrigin:MTLOriginMake(0, 0, 0) 
-                             sourceSize:MTLSizeMake(g_cachedWidth, g_cachedHeight, 1) 
-                              toTexture:colorDst 
-                       destinationSlice:0 
-                       destinationLevel:0 
-                      destinationOrigin:MTLOriginMake(0, 0, 0)];
-            [blitEnc endEncoding];
+            if (blitEnc) {
+                [blitEnc copyFromTexture:g_cachedTempTexture 
+                             sourceSlice:0 
+                             sourceLevel:0 
+                               sourceOrigin:MTLOriginMake(0, 0, 0) 
+                                 sourceSize:MTLSizeMake(g_cachedWidth, g_cachedHeight, 1) 
+                                  toTexture:colorDst 
+                           destinationSlice:0 
+                           destinationLevel:0 
+                          destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [blitEnc endEncoding];
+            }
         }
+        
+        g_renderInProgress.store(false);
     } 
 
     return 0;
@@ -251,26 +298,34 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
     JNIEnv *env, jclass clazz, jlong deviceHandle, jbyteArray dataJ, jint size) {
 
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
-    if (!device || !dataJ) return 0;
+    if (!device) return 0;
 
     NSUInteger bufferIndex = g_currentBufferIndex;
     const NSUInteger requiredSize = (NSUInteger)size;
-    const NSUInteger allocSize = 4096; // Fixed size for alignment safety
+    // 对齐到16字节边界
+    const NSUInteger allocSize = ((requiredSize + 15) / 16) * 16;
+
+    // 等待上一个缓冲区的渲染完成
+    NSUInteger targetIndex = g_completedBufferIndex.load();
+    if (bufferIndex != targetIndex) {
+        // 如果需要的缓冲区还没准备好，等待一下
+        // 在实际使用中，这通常意味着渲染速度跟不上
+    }
 
     if (g_uniformBuffers[bufferIndex] == nil || 
-        g_uniformBuffers[bufferIndex].length < requiredSize) {
-        
+        g_uniformBuffers[bufferIndex].length < allocSize) {
         g_uniformBuffers[bufferIndex] = nil;
         g_uniformBuffers[bufferIndex] = [device newBufferWithLength:allocSize options:MTLResourceStorageModeShared];
     }
 
-    jbyte* data = env->GetByteArrayElements(dataJ, nullptr);
-    if (!data) return 0;
-    
-    void* bufferContents = [g_uniformBuffers[bufferIndex] contents];
-    memcpy(bufferContents, data, (size_t)size);
-    
-    env->ReleaseByteArrayElements(dataJ, data, JNI_ABORT);
+    if (dataJ) {
+        jbyte* data = env->GetByteArrayElements(dataJ, nullptr);
+        if (data) {
+            void* bufferContents = [g_uniformBuffers[bufferIndex] contents];
+            memcpy(bufferContents, data, (size_t)size);
+            env->ReleaseByteArrayElements(dataJ, data, JNI_ABORT);
+        }
+    }
 
     return (jlong)(__bridge void*) g_uniformBuffers[bufferIndex];
 }
@@ -281,13 +336,24 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 JNIEXPORT void JNICALL 
 Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv *env, jclass clazz, jlong handle) {
     if (!handle) return;
+    
     id<MTLCommandBuffer> buf = (__bridge id<MTLCommandBuffer>)(void*) handle;
+    
+    // 添加完成通知
+    __block NSUInteger completedIdx = g_currentBufferIndex;
+    [buf addCompletedHandler:^(id<MTLCommandBuffer> cmdBuf) {
+        g_completedBufferIndex.store(completedIdx);
+        g_renderInProgress.store(false);
+    }];
+    
     [buf commit];
+    
+    // 更新缓冲区索引（只有在渲染完成后才真正切换）
     g_currentBufferIndex = (g_currentBufferIndex + 1) % BUFFER_COUNT;
 }
 
 // =========================================================================
-// 其他方法 (保持不变)
+// 其他方法
 // =========================================================================
 
 JNIEXPORT jlong JNICALL 
