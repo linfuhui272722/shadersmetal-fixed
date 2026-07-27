@@ -238,4 +238,75 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 JNIEXPORT void JNICALL
 Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv*, jclass, jlong handle) {
     if (!handle) return;
-    id
+    id obj = (__bridge_transfer id)(void*) handle;
+    (void) obj;
+}
+
+// =========================================================================
+// ★ 新增：getMetalTextureFromGLTexture
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(
+    JNIEnv* env, jclass, jint textureId) {
+    if (textureId <= 0) return 0LL;
+    NSLog(@"[MetallumShaders] getMetalTextureFromGLTexture(%d) called - unsupported, returning 0", textureId);
+    return 0LL;
+}
+
+// =========================================================================
+// ★ 新增：getDefaultCommandQueue
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(
+    JNIEnv* env, jclass) {
+    @autoreleasepool {
+        if (g_sharedQueue == nil) {
+            if (g_sharedDevice == nil) {
+                 g_sharedDevice = MTLCreateSystemDefaultDevice();
+            }
+            if (g_sharedDevice) {
+                 g_sharedQueue = [g_sharedDevice newCommandQueue];
+            }
+        }
+        return (jlong)(__bridge_retained void*)g_sharedQueue;
+    }
+}
+
+// =========================================================================
+// ★ 新增：createCommandBuffer (修复：复用全局 Queue)
+// =========================================================================
+JNIEXPORT jlong JNICALL
+Java_com_metallum_shaders_jni_MetalNative_createCommandBuffer(
+    JNIEnv* env, jclass) {
+    @autoreleasepool {
+        if (g_sharedQueue == nil) {
+            // Fallback
+            if (g_sharedDevice == nil) g_sharedDevice = MTLCreateSystemDefaultDevice();
+            if (g_sharedDevice) g_sharedQueue = [g_sharedDevice newCommandQueue];
+        }
+        if (g_sharedQueue == nil) return 0LL;
+        
+        id<MTLCommandBuffer> buffer = [g_sharedQueue commandBuffer];
+        return (jlong)(__bridge_retained void*)buffer;
+    }
+}
+
+// =========================================================================
+// ★★★ 新增：commitCommandBuffer ★★★
+// =========================================================================
+JNIEXPORT void JNICALL
+Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(
+    JNIEnv* env, jclass, jlong cmdBufferHandle) {
+    
+    if (cmdBufferHandle == 0) return;
+
+    id<MTLCommandBuffer> cmdBuffer = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
+    
+    if (cmdBuffer != nil) {
+        [cmdBuffer commit];
+        // 注意：我们不再 release cmdBuffer，因为它是从全局 Queue 中获取的
+        // Metal 会自动管理它的生命周期
+    }
+}
+
+} // extern "C"
