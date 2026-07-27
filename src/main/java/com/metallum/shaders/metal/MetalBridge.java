@@ -188,16 +188,35 @@ public final class MetalBridge {
 
     /**
      * 从 MetalGpuTexture 提取 nativeHandle 地址
+     * 修复：使用公共 API MemorySegment 接口来避免 IllegalAccessException
      */
     private static long extractHandle(Object tex) throws Exception {
-        // 获取 nativeHandle 字段
+        // 1. 获取 nativeHandle 字段
         Field nativeHandleField = tex.getClass().getDeclaredField("nativeHandle");
         nativeHandleField.setAccessible(true);
         Object memorySegment = nativeHandleField.get(tex);
         if (memorySegment == null) return -1L;
 
-        // 调用 MemorySegment.address() 获取地址
-        Method addressMethod = memorySegment.getClass().getMethod("address");
+        // 2. 关键修复：
+        // 不要使用 memorySegment.getClass() 获取方法，因为那会返回受保护的内部类。
+        // 显式使用公共接口 java.lang.foreign.MemorySegment (Java 22+ 标准 API)
+        Class<?> memorySegmentClass;
+        try {
+            // Java 22+ 标准路径
+            memorySegmentClass = Class.forName("java.lang.foreign.MemorySegment");
+        } catch (ClassNotFoundException e) {
+            // 备选：对于较早的孵化器版本 (Java 19-21)，虽然你用的是 Java 25，但保留备选逻辑更稳健
+            try {
+                memorySegmentClass = Class.forName("jdk.incubator.foreign.MemorySegment");
+            } catch (ClassNotFoundException ex) {
+                throw new Exception("Cannot find MemorySegment class in JDK", ex);
+            }
+        }
+
+        // 3. 在公共接口上获取 address() 方法
+        Method addressMethod = memorySegmentClass.getMethod("address");
+        
+        // 4. 调用获取地址
         return (long) addressMethod.invoke(memorySegment);
     }
 }
