@@ -19,6 +19,12 @@ extern "C" {
 static id<MTLDevice> g_sharedDevice = nil;
 static id<MTLCommandQueue> g_sharedQueue = nil;
 
+// ★★★ 新增：缓存临时纹理，防止每帧分配内存导致崩溃 ★★★
+static id<MTLTexture> g_cachedTempTexture = nil;
+static NSUInteger g_cachedWidth = 0;
+static NSUInteger g_cachedHeight = 0;
+static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
+
 // =========================================================================
 // getDefaultDevice
 // =========================================================================
@@ -108,7 +114,7 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
 }
 
 // =========================================================================
-// dispatchFullscreen (修复纹理冲突)
+// dispatchFullscreen (优化：缓存纹理，解决崩溃)
 // =========================================================================
 JNIEXPORT jint JNICALL
 Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
@@ -127,20 +133,38 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 
     if (!cmd || !pipe || !colorSrc || !depthSrc || !colorDst) return 1;
 
-    // ★★★ 关键修复：检测纹理读写冲突 (Feedback Loop) ★★★
     id<MTLTexture> actualDst = colorDst;
-    id<MTLTexture> tempTex = nil;
     bool needsBlit = false;
 
+    // ★★★ 修复：检测纹理读写冲突，但复用缓存纹理 ★★★
     if (colorSrc == colorDst) {
-        // 创建临时纹理避免读写冲突
-        MTLTextureDescriptor* texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorDst.pixelFormat
-                                                                                            width:colorDst.width
-                                                                                           height:colorDst.height
-                                                                                        mipmapped:NO];
-        tempTex = [g_sharedDevice newTextureWithDescriptor:texDesc];
-        actualDst = tempTex;
         needsBlit = true;
+        
+        // 检查缓存的纹理是否有效（尺寸和格式是否匹配）
+        if (g_cachedTempTexture == nil || 
+            g_cachedWidth != colorDst.width || 
+            g_cachedHeight != colorDst.height ||
+            g_cachedFormat != colorDst.pixelFormat) {
+            
+            // 缓存失效，重新创建
+            @autoreleasepool {
+                MTLTextureDescriptor* texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorDst.pixelFormat
+                                                                                                    width:colorDst.width
+                                                                                                   height:colorDst.height
+                                                                                                mipmapped:NO];
+                // 使用全局 Device 创建
+                if (g_sharedDevice) {
+                    g_cachedTempTexture = [g_sharedDevice newTextureWithDescriptor:texDesc];
+                    g_cachedWidth = colorDst.width;
+                    g_cachedHeight = colorDst.height;
+                    g_cachedFormat = colorDst.pixelFormat;
+                    NSLog(@"[MetallumShaders] Created new cached temp texture: %lux %lu", (unsigned long)g_cachedWidth, (unsigned long)g_cachedHeight);
+                }
+            }
+        }
+        
+        actualDst = g_cachedTempTexture;
+        if (!actualDst) return 1; // 创建失败保护
     }
 
     // 渲染编码
@@ -162,9 +186,9 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     [enc endEncoding];
 
     // 如果使用了临时纹理，拷贝回目标纹理
-    if (needsBlit && tempTex != nil) {
+    if (needsBlit && g_cachedTempTexture != nil) {
         id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
-        [blitEnc copyFromTexture:tempTex sourceSlice:0 sourceLevel:0
+        [blitEnc copyFromTexture:g_cachedTempTexture sourceSlice:0 sourceLevel:0
                          toTexture:colorDst destinationSlice:0 destinationLevel:0
                           sliceCount:1 levelCount:1];
         [blitEnc endEncoding];
@@ -195,7 +219,7 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 JNIEXPORT void JNICALL
 Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv*, jclass, jlong handle) {
     if (!handle) return;
-    id obj = (__bridge_transfer id)(void*) handle; // ARC 会自动释放
+    id obj = (__bridge_transfer id)(void*) handle;
     (void) obj;
 }
 
