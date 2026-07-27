@@ -4,8 +4,8 @@ import com.metallum.shaders.jni.MetalNative;
 import com.metallum.shaders.jni.NativeLoader;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Camera; // 新增：对应旧版 net.minecraft.client.render.Camera
-import net.minecraft.client.renderer.GameRenderer;
+import net.minecraft.client.Camera; // 修复：引入正确的 Camera 类
+import net.minecraft.client.renderer.GameRenderer; // 修复：引入正确的 GameRenderer 类
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +36,9 @@ public final class MetalBridge {
     public static synchronized void init() {
         if (initialised) return;
         initialised = true;
+
+        // 调试日志：确认新代码已加载
+        LOGGER.info("=== MetalBridge NEW CODE v2.0 LOADED ===");
 
         try {
             if (!NativeLoader.ensureLoaded()) {
@@ -71,7 +74,7 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // Camera 获取 (修复重点)
+    // Camera 获取 (核心修复)
     // =====================================================================
 
     /**
@@ -88,7 +91,11 @@ public final class MetalBridge {
 
             // 使用缓存避免每次反射扫描
             if (cameraFieldCache != null) {
-                return (Camera) cameraFieldCache.get(renderer);
+                try {
+                    return (Camera) cameraFieldCache.get(renderer);
+                } catch (IllegalAccessException ignored) {
+                    // 缓存失效，重新查找
+                }
             }
 
             // 通过类型扫描查找 Camera 字段
@@ -98,6 +105,7 @@ public final class MetalBridge {
                 if (Camera.class.isAssignableFrom(field.getType())) {
                     field.setAccessible(true);
                     cameraFieldCache = field;
+                    LOGGER.debug("Found Camera field in GameRenderer: {}", field.getName());
                     return (Camera) field.get(renderer);
                 }
             }
@@ -250,7 +258,7 @@ public final class MetalBridge {
             // Java 22+ 标准路径
             memorySegmentClass = Class.forName("java.lang.foreign.MemorySegment");
         } catch (ClassNotFoundException e) {
-            // 备选：对于较早的孵化器版本 (Java 19-21)，虽然你用的是 Java 25，但保留备选逻辑更稳健
+            // 备选：对于较早的孵化器版本 (Java 19-21)
             try {
                 memorySegmentClass = Class.forName("jdk.incubator.foreign.MemorySegment");
             } catch (ClassNotFoundException ex) {
