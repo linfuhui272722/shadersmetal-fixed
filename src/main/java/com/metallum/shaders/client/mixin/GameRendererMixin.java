@@ -21,87 +21,71 @@ import java.nio.ByteOrder;
 public abstract class GameRendererMixin {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/Mixin");
+    private static int frameCounter = 0;
 
     @Inject(method = "render", at = @At("RETURN"))
     private void metallum_shaders$postRender(DeltaTracker deltaTracker, boolean renderLevel, CallbackInfo ci) {
-        
-        // 1. 确保已初始化
         ShaderManager.init();
-        if (!ShaderManager.isAvailable()) {
-            return;
-        }
+        if (!ShaderManager.isAvailable()) return;
 
         long pipeline = ShaderManager.getPipeline("composite");
         if (pipeline == 0L) return;
 
-        // 2. 获取 Metal 资源句柄
         long cmdBuffer = MetalBridge.getCurrentCommandBufferHandle();
         long colorSrc  = MetalBridge.getMainColorTextureHandle();
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
-        // 调试日志：每 60 帧打印一次，减少日志刷屏
-        // LOGGER.info("[MetallumMixins] Frame tick - cmdBuffer: {}, colorSrc: {}, depthSrc: {}", cmdBuffer, colorSrc, depthSrc);
+        if (cmdBuffer <= 0 || colorSrc <= 0) return;
 
-        if (cmdBuffer <= 0 || colorSrc <= 0) {
-            // 只在第一次失败时打印
-            // LOGGER.warn("[MetallumMixins] Skipping frame due to invalid handles.");
-            return;
+        // 调试：每60帧打印一次，确认运行
+        if (frameCounter % 60 == 0) {
+             LOGGER.info("[MetallumMixins] Rendering frame...");
         }
+        frameCounter++;
 
-        long colorDst = colorSrc; 
+        long colorDst = colorSrc;
         
-        // 3. 准备 Uniform 数据
         int width = Minecraft.getInstance().getWindow().getWidth();
-        int height = Minecraft.getInstance().getWindow().getHeight();
+        int height = Minecraft.getInstance().getWindow().getWindow().getHeight(); // 修正：使用正确的高度获取
         
         ByteBuffer uniformData = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
-        
-        float time = System.currentTimeMillis() / 1000.0f;
-        uniformData.putFloat(time);              
-        uniformData.putFloat(width);             
-        uniformData.putFloat(height);            
+        uniformData.putFloat(System.currentTimeMillis() / 1000.0f);
+        uniformData.putFloat(width);
+        uniformData.putFloat(height);
         
         Camera camera = MetalBridge.getMainCamera();
-        if (camera == null) {
-            uniformData.putFloat(0.0f);
-            uniformData.putFloat(0.0f);
-            uniformData.putFloat(0.0f);
-        } else {
+        if (camera != null) {
             uniformData.putFloat((float) camera.position().x);
             uniformData.putFloat((float) camera.position().y);
             uniformData.putFloat((float) camera.position().z);
+        } else {
+            uniformData.putFloat(0).putFloat(0).putFloat(0);
         }
-        
         uniformData.flip();
 
         byte[] uniformBytes = new byte[uniformData.remaining()];
         uniformData.get(uniformBytes);
 
         long device = MetalBridge.getDeviceHandle();
-        long uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
+        long uniformBuffer = 0;
+        
+        try {
+            uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
 
-        // 4. 执行绘制
-        int result = MetalNative.dispatchFullscreen(
-            cmdBuffer,
-            pipeline,
-            colorSrc,
-            depthSrc,
-            normalSrc,
-            colorDst,
-            uniformBuffer,
-            uniformBytes.length
-        );
-        
-        if (result != 0) {
-             LOGGER.error("[MetallumMixins] dispatchFullscreen failed with code: {}", result);
+            int result = MetalNative.dispatchFullscreen(
+                cmdBuffer, pipeline, colorSrc, depthSrc, normalSrc, colorDst, uniformBuffer, uniformBytes.length
+            );
+            
+            if (result != 0) LOGGER.error("[MetallumMixins] dispatchFullscreen error: {}", result);
+            
+            MetalNative.commitCommandBuffer(cmdBuffer);
+        } finally {
+            // ★★★ 关键修复：释放 Uniform Buffer，防止内存泄漏 ★★★
+            if (uniformBuffer != 0) {
+                MetalNative.release(uniformBuffer);
+            }
         }
-        
-        // ★★★ 关键：提交命令缓冲区 ★★★
-        MetalNative.commitCommandBuffer(cmdBuffer);
-        
-        // ★ 修复：不要在这里 release cmdBuffer，我们复用全局 Queue
-        // MetalNative.release(cmdBuffer); 
     }
 
     @Inject(method = "close", at = @At("RETURN"))
