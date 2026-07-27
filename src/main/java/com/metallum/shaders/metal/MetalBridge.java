@@ -34,7 +34,7 @@ public final class MetalBridge {
     private MetalBridge() {}
 
     public static synchronized void init() {
-        if (initialled) return;
+        if (initialised) return;
         initialised = true;
 
         // 调试日志：确认新代码已加载
