@@ -26,9 +26,6 @@ public final class MetalNative {
     public static native void release(long handle);
 
     // ---------- ★ 新增：纹理映射 ----------
-    /**
-     * 通过 OpenGL 纹理 ID 获取对应的 Metal 纹理句柄（需要 JNI 桥接）
-     */
     public static native long getMetalTextureFromGLTexture(int textureId);
 
     // ---------- ★ 新增：命令队列 ----------
@@ -38,9 +35,5 @@ public final class MetalNative {
     public static native long createCommandBuffer();
 
     // ★★★ 新增方法：提交命令缓冲区 ★★★
-    /**
-     * 将已编码的命令缓冲区提交到 GPU 队列执行。
-     * 这是让着色器生效的关键步骤。
-     */
     public static native void commitCommandBuffer(long cmdBufferHandle);
 }
