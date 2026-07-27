@@ -31,14 +31,15 @@ public abstract class GameRendererMixin {
         long pipeline = ShaderManager.getPipeline("composite");
         if (pipeline == 0L) return;
 
-        // ★★★ 修复：创建我们自己的命令缓冲区，不与游戏共用 ★★★
+        // ★★★ 修复：创建我们自己的命令缓冲区，不与游戏共用，解决卡死问题 ★★★
         long cmdBuffer = MetalNative.createCommandBuffer();
-        
+        if (cmdBuffer <= 0) return; // 创建失败则跳过
+
         long colorSrc  = MetalBridge.getMainColorTextureHandle();
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
-        if (cmdBuffer <= 0 || colorSrc <= 0) return;
+        if (colorSrc <= 0) return;
 
         if (frameCounter % 60 == 0) {
              LOGGER.info("[MetallumMixins] Rendering frame...");
