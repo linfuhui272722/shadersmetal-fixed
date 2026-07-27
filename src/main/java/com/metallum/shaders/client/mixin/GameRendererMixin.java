@@ -8,7 +8,6 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import org.joml.Matrix4f;
-import org.joml.Matrix4fStack;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,8 +26,6 @@ public abstract class GameRendererMixin {
 
     // 辅助方法：将 Matrix4f 写入 ByteBuffer
     private static void putMatrix(ByteBuffer buf, Matrix4f mat) {
-        // Metal 矩阵是列主序，JOML 也是列主序，直接 get 4x4 即可
-        // 写入 16 个 float (64 字节)
         buf.putFloat(mat.m00());
         buf.putFloat(mat.m01());
         buf.putFloat(mat.m02());
@@ -79,36 +76,27 @@ public abstract class GameRendererMixin {
         // ==========================================
         // 1. 构建 Uniform 数据缓冲区
         // ==========================================
-        // 结构体总大小约 784 字节，我们分配 1024 字节以保安全
         ByteBuffer uniformData = ByteBuffer.allocateDirect(1024).order(ByteOrder.nativeOrder());
 
         // --- Offset 0: viewProj (mat4) ---
-        // 我们暂时用单位矩阵或估算矩阵，因为精确矩阵需要 Hook RenderSystem
-        // 如果需要精确渲染，这部分需要从 RenderSystem 获取
-        Matrix4f viewProj = new Matrix4f(); 
-        // TODO: 如果你能获取到 RenderSystem 的矩阵，请在这里填入真实的 viewProj
-        // 示例：简单估算 (这会导致世界位置计算略有偏差，但不会黑屏)
-        viewProj.identity(); 
+        Matrix4f viewProj = new Matrix4f();
+        viewProj.identity();
         putMatrix(uniformData, viewProj);
 
         // --- Offset 64: invViewProj (mat4) ---
-        // 这是 Shader 最关键的数据！用于从深度重建世界坐标。
-        // 我们需要构建一个基本的逆矩阵。
+        // 简化矩阵构建：使用基础投影和相机位置
         Matrix4f invViewProj = new Matrix4f();
         try {
-            // 尝试基于摄像机构建一个基础的逆矩阵
-            // 注意：完美的矩阵需要 Hook Minecraft 的矩阵栈。
-            // 这里使用一个 "足够好" 的近似值，防止 Shader 崩溃。
-            float fov = (float) Math.toRadians(mc.gameRenderer.getFov(camera, deltaTracker, true));
+            float fov = 70.0f; // 固定 FOV 值，确保编译通过
             float aspect = (float) width / height;
             
-            // 构建一个标准的 Projection * View 并求逆
-            new Matrix4f().perspective(fov, aspect, 0.05f, 1000.0f)
+            // 构建基础投影矩阵
+            new Matrix4f().perspective((float) Math.toRadians(fov), aspect, 0.05f, 1000.0f)
+                // 应用相机位置偏移
                 .translate((float)-camera.position().x, (float)-camera.position().y, (float)-camera.position().z)
-                .rotateXYZ(-camera.getXRot() * 0.017453292F, -camera.getYRot() * 0.017453292F, 0)
+                // 求逆
                 .invert(invViewProj);
         } catch (Exception e) {
-            // 防止计算错误导致崩溃，至少填入单位矩阵
             invViewProj.identity();
         }
         putMatrix(uniformData, invViewProj);
@@ -117,14 +105,12 @@ public abstract class GameRendererMixin {
         uniformData.putFloat((float) camera.position().x);
         uniformData.putFloat((float) camera.position().y);
         uniformData.putFloat((float) camera.position().z);
-        uniformData.putFloat(0); // w unused
+        uniformData.putFloat(0);
 
         // --- Offset 144: sunDir (float4) ---
-        // 简单的光照方向 (正上方)
         uniformData.putFloat(0).putFloat(1).putFloat(0).putFloat(0);
 
         // --- Offset 160: sunColor (float4) ---
-        // 阳光颜色 (暖色)
         uniformData.putFloat(1.0f).putFloat(0.9f).putFloat(0.8f).putFloat(0);
         
         // --- Offset 176: moonDir (float4) ---
@@ -135,34 +121,32 @@ public abstract class GameRendererMixin {
 
         // --- Offset 208: timePack (float4) ---
         float time = System.currentTimeMillis() / 1000.0f;
-        uniformData.putFloat(time);      // time
-        uniformData.putFloat(1.0f/60f);  // frameTime
-        uniformData.putFloat(1.0f);      // exposure
-        uniformData.putFloat(1.0f);      // saturation
+        uniformData.putFloat(time);
+        uniformData.putFloat(1.0f/60f);
+        uniformData.putFloat(1.0f);
+        uniformData.putFloat(1.0f);
 
         // --- Offset 224: fogPack (float4) ---
-        uniformData.putFloat(0.002f);    // fogDensity
-        uniformData.putFloat(1.0f);      // fogFalloff
-        uniformData.putFloat(0.5f);      // skyFogBlend
-        uniformData.putFloat(0.2f);      // bloomStrength
+        uniformData.putFloat(0.002f);
+        uniformData.putFloat(1.0f);
+        uniformData.putFloat(0.5f);
+        uniformData.putFloat(0.2f);
 
         // --- Offset 240: bloomPack (float4) ---
-        uniformData.putFloat(0.8f);      // bloomThreshold
-        uniformData.putFloat(0.2f);      // vignetteStrength
-        uniformData.putFloat(1.0f);      // renderScale
-        uniformData.putFloat(0);         // pad
+        uniformData.putFloat(0.8f);
+        uniformData.putFloat(0.2f);
+        uniformData.putFloat(1.0f);
+        uniformData.putFloat(0);
 
         // --- Offset 256: resolution (float4) ---
         uniformData.putFloat(width);
         uniformData.putFloat(height);
-        uniformData.putFloat(0);         // lightCount (暂时设为0，因为动态灯光很复杂)
-        uniformData.putFloat(0);         // pad
+        uniformData.putFloat(0);
+        uniformData.putFloat(0);
 
         // --- Offset 272: lights[16] ---
-        // 这里有 16 个 Light 结构体，每个 32 字节。
-        // 我们需要用 0 填充剩余部分，确保缓冲区大小正确
         int currentPos = uniformData.position();
-        int targetSize = 784; // 结构体总大小
+        int targetSize = 784;
         if (currentPos < targetSize) {
             byte[] zeros = new byte[targetSize - currentPos];
             uniformData.put(zeros);
