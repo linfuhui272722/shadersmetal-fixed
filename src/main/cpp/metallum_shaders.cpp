@@ -164,7 +164,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     // 如果使用了临时纹理，拷贝回目标纹理
     if (needsBlit && tempTex != nil) {
         id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
-        [blitEnc copyFromTexture:tempEnc sourceSlice:0 sourceLevel:0
+        [blitEnc copyFromTexture:tempTex sourceSlice:0 sourceLevel:0
                          toTexture:colorDst destinationSlice:0 destinationLevel:0
                           sliceCount:1 levelCount:1];
         [blitEnc endEncoding];
