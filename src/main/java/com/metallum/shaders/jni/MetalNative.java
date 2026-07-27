@@ -147,16 +147,4 @@ public class MetalNative {
         // 其他资源类型的释放逻辑可以在这里添加
         System.err.println("[MetalNative] Warning: Unknown resource type for handle: " + handle);
     }
-
-    /**
-     * 释放缓冲区（兼容旧代码）
-     */
-    public static void releaseBuffer(long handle) {
-        if (handle != 0) {
-            // 这里应该调用 native 方法释放缓冲区
-            // 由于你没有提供具体的 native 实现，这里只是占位符
-            // 实际实现需要在 C++ 中完成
-            System.err.println("[MetalNative] Warning: releaseBuffer native method not implemented yet");
-        }
-    }
 }
