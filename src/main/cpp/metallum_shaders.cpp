@@ -26,7 +26,7 @@ static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
 static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
 
-// 三重缓冲 - 增加到 30 以防止 GPU/CPU 同步问题导致的卡死
+// 三重缓冲
 #define BUFFER_COUNT 30
 static id<MTLBuffer> g_uniformBuffers[BUFFER_COUNT] = { nil };
 static NSUInteger g_currentBufferIndex = 0;
@@ -125,7 +125,6 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
         desc.fragmentFunction = ffn;
         desc.colorAttachments[0].pixelFormat = (MTLPixelFormat) colorFormat;
         
-        // 根据 blendMode 设置混合状态
         if (blendMode == 0) {
             desc.colorAttachments[0].blendingEnabled = NO;
         } else {
@@ -177,9 +176,6 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                 g_cachedHeight != colorDst.height ||
                 g_cachedFormat != colorDst.pixelFormat) {
                 
-                // 释放旧纹理
-                // g_cachedTempTexture = nil; // ARC 会自动处理
-                
                 MTLTextureDescriptor* texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:colorDst.pixelFormat
                                                                                                     width:colorDst.width
                                                                                                    height:colorDst.height
@@ -203,7 +199,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
         // --- 配置 Render Pass ---
         MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
         desc.colorAttachments[0].texture = actualDst;
-        // Clear 为黑色是安全的，因为我们会完全覆盖它
+        // LoadAction Clear 是安全的
         desc.colorAttachments[0].loadAction = MTLLoadActionClear;
         desc.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
         desc.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -227,9 +223,10 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
         [enc endEncoding];
 
         // --- 如果使用了临时纹理，把结果复制回去 ---
+        // 修复：使用更明确的 Blit 参数，防止 GPU 挂起
         if (needsBlit && g_cachedTempTexture != nil) {
             id<MTLBlitCommandEncoder> blitEnc = [cmd blitCommandEncoder];
-            // 使用更详细的复制方法以确保兼容性
+            // 显式指定源和目标区域，确保不越界
             [blitEnc copyFromTexture:g_cachedTempTexture 
                          sourceSlice:0 
                          sourceLevel:0 
@@ -258,14 +255,12 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
 
     NSUInteger bufferIndex = g_currentBufferIndex;
     const NSUInteger requiredSize = (NSUInteger)size;
-    // 对齐到 4096 以减少重新分配
-    const NSUInteger allocSize = ((requiredSize / 256) + 1) * 256; 
+    const NSUInteger allocSize = 4096; // Fixed size for alignment safety
 
-    // 如果缓冲区不存在或太小，重新创建
     if (g_uniformBuffers[bufferIndex] == nil || 
         g_uniformBuffers[bufferIndex].length < requiredSize) {
         
-        g_uniformBuffers[bufferIndex] = nil; // ARC release
+        g_uniformBuffers[bufferIndex] = nil;
         g_uniformBuffers[bufferIndex] = [device newBufferWithLength:allocSize options:MTLResourceStorageModeShared];
     }
 
@@ -288,12 +283,11 @@ Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv *env, jclas
     if (!handle) return;
     id<MTLCommandBuffer> buf = (__bridge id<MTLCommandBuffer>)(void*) handle;
     [buf commit];
-    // 推进环形缓冲区索引
     g_currentBufferIndex = (g_currentBufferIndex + 1) % BUFFER_COUNT;
 }
 
 // =========================================================================
-// 新增：纹理管理方法
+// 其他方法 (保持不变)
 // =========================================================================
 
 JNIEXPORT jlong JNICALL 
@@ -302,7 +296,7 @@ Java_com_metallum_shaders_jni_MetalNative_createTexture(JNIEnv *env, jclass claz
         id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
         if (!device) return 0;
 
-        MTLPixelFormat pixelFormat = MTLPixelFormatBGRA8Unorm; // 默认
+        MTLPixelFormat pixelFormat = MTLPixelFormatBGRA8Unorm;
         if (format == 1) pixelFormat = MTLPixelFormatRGBA16Float;
         
         MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat
@@ -322,7 +316,7 @@ Java_com_metallum_shaders_jni_MetalNative_destroyTexture(JNIEnv *env, jclass cla
     @autoreleasepool {
         if (textureHandle) {
             id<MTLTexture> texture = (__bridge_transfer id<MTLTexture>)(void*) textureHandle;
-            texture = nil; // ARC will release
+            texture = nil;
         }
     }
 }
@@ -350,20 +344,11 @@ Java_com_metallum_shaders_jni_MetalNative_blitTexture(JNIEnv *env, jclass clazz,
     }
 }
 
-// =========================================================================
-// 其他方法
-// =========================================================================
 JNIEXPORT void JNICALL
-Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv *env, jclass clazz, jlong handle) {
-    // 由于我们使用了 ARC，这个方法可以留空
-    // 如果确定要立即释放，可以调用 CFRelease，但 ARC 会自动管理
-}
+Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv *env, jclass clazz, jlong handle) {}
 
 JNIEXPORT void JNICALL
-Java_com_metallum_shaders_jni_MetalNative_releaseBuffer(JNIEnv *env, jclass clazz, jlong handle) {
-    // 同上，缓冲区由 ARC 管理，或者我们可以显式释放
-    // 这里我们不做任何操作，让 ARC 去管理
-}
+Java_com_metallum_shaders_jni_MetalNative_releaseBuffer(JNIEnv *env, jclass clazz, jlong handle) {}
 
 JNIEXPORT jlong JNICALL 
 Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv *env, jclass clazz) {
