@@ -4,6 +4,7 @@ import com.metallum.shaders.jni.MetalNative;
 import com.metallum.shaders.jni.NativeLoader;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.Camera; // 新增：对应旧版 net.minecraft.client.render.Camera
 import net.minecraft.client.renderer.GameRenderer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,6 +29,7 @@ public final class MetalBridge {
     private static Field renderTargetField;
     private static Field colorTextureField;
     private static Field depthTextureField;
+    private static Field cameraFieldCache; // 缓存 Camera 字段
 
     private MetalBridge() {}
 
@@ -66,6 +68,47 @@ public final class MetalBridge {
 
     public static long getCurrentDeviceHandle() {
         return getDeviceHandle();
+    }
+
+    // =====================================================================
+    // Camera 获取 (修复重点)
+    // =====================================================================
+
+    /**
+     * 获取游戏主相机对象
+     * 修复：根据映射表，Camera 位于 net.minecraft.client 包，且存储在 GameRenderer 中。
+     */
+    public static Camera getMainCamera() {
+        if (!isAvailable()) return null;
+        try {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.gameRenderer == null) return null;
+
+            GameRenderer renderer = mc.gameRenderer;
+
+            // 使用缓存避免每次反射扫描
+            if (cameraFieldCache != null) {
+                return (Camera) cameraFieldCache.get(renderer);
+            }
+
+            // 通过类型扫描查找 Camera 字段
+            // 这种方法不依赖具体的字段名（如 camera 或 mainCamera），更稳健
+            Field[] fields = GameRenderer.class.getDeclaredFields();
+            for (Field field : fields) {
+                if (Camera.class.isAssignableFrom(field.getType())) {
+                    field.setAccessible(true);
+                    cameraFieldCache = field;
+                    return (Camera) field.get(renderer);
+                }
+            }
+
+            LOGGER.warn("Could not find Camera field in GameRenderer by type.");
+            return null;
+
+        } catch (Throwable t) {
+            LOGGER.warn("Failed to get main camera", t);
+            return null;
+        }
     }
 
     // =====================================================================
@@ -148,9 +191,11 @@ public final class MetalBridge {
 
         if (renderTargetField == null) {
             try {
+                // Mojmap 映射
                 renderTargetField = GameRenderer.class.getDeclaredField("mainRenderTarget");
                 renderTargetField.setAccessible(true);
             } catch (NoSuchFieldException e) {
+                // 备用名称
                 renderTargetField = GameRenderer.class.getDeclaredField("renderTarget");
                 renderTargetField.setAccessible(true);
             }
@@ -159,7 +204,7 @@ public final class MetalBridge {
     }
 
     private static Object getColorTexture(RenderTarget target) throws Exception {
-        // 先尝试方法
+        // 先尝试方法 (部分映射可能存在方法)
         try {
             Method m = RenderTarget.class.getMethod("getColorTexture");
             return m.invoke(target);
