@@ -26,9 +26,9 @@ static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
 static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
 
-// 三重缓冲
-#define BUFFER_COUNT 3
-static id<MTLBuffer> g_uniformBuffers[BUFFER_COUNT] = { nil, nil, nil };
+// ★★★ 关键修复：增加缓冲池大小到 10，防止 CPU 覆盖 GPU 正在使用的资源 ★★★
+#define BUFFER_COUNT 10 
+static id<MTLBuffer> g_uniformBuffers[BUFFER_COUNT] = { nil };
 static NSUInteger g_currentBufferIndex = 0;
 
 // =========================================================================
@@ -59,8 +59,6 @@ Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv *env, jclass c
             g_sharedDevice = MTLCreateSystemDefaultDevice();
             if (!g_sharedDevice) return 0LL;
             g_sharedQueue = [g_sharedDevice newCommandQueue];
-            
-            // 初始化采样器
             initSampler();
         }
         return (jlong)(__bridge_retained void*) g_sharedDevice;
@@ -164,6 +162,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     if (colorSrc == colorDst) {
         needsBlit = true;
         
+        // 重建临时纹理逻辑
         if (g_cachedTempTexture == nil || 
             g_cachedWidth != colorDst.width || 
             g_cachedHeight != colorDst.height ||
@@ -174,7 +173,6 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                                                                                                     width:colorDst.width
                                                                                                    height:colorDst.height
                                                                                                 mipmapped:NO];
-                
                 texDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
                 texDesc.storageMode = MTLStorageModePrivate;
 
@@ -200,7 +198,6 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:desc];
     [enc setRenderPipelineState:pipe];
     
-    // 绑定 Sampler
     if (g_sharedSampler) {
         [enc setFragmentSamplerState:g_sharedSampler atIndex:0];
     }
@@ -228,7 +225,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 }
 
 // =========================================================================
-// createBuffer (修正版：移除 iOS 不支持的 didModifyRange)
+// createBuffer (修正版：大缓冲池)
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_createBuffer(
@@ -237,40 +234,49 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
     if (!device || !dataJ) return 0;
 
+    // 轮转缓冲索引
     NSUInteger bufferIndex = g_currentBufferIndex;
     const NSUInteger requiredSize = (NSUInteger)size;
+    // 分配稍大的空间以减少重新分配
     const NSUInteger allocSize = 4096; 
 
+    // 如果缓冲不存在或太小，重新分配
     if (g_uniformBuffers[bufferIndex] == nil || 
         g_uniformBuffers[bufferIndex].length < requiredSize) {
         
         g_uniformBuffers[bufferIndex] = nil;
-        // Shared 模式下，CPU 写入直接对 GPU 可见
         g_uniformBuffers[bufferIndex] = [device newBufferWithLength:allocSize options:MTLResourceStorageModeShared];
     }
 
+    // 获取 Java 数据指针
     jbyte* data = env->GetByteArrayElements(dataJ, nullptr);
+    if (!data) return 0;
+
+    // 拷贝数据
     void* bufferContents = [g_uniformBuffers[bufferIndex] contents];
     memcpy(bufferContents, data, (size_t)size);
     
-    // ★★★ 错误修复：移除 didModifyRange，iOS Shared 模式不需要 ★★★
-    
+    // 释放 Java 数组引用
     env->ReleaseByteArrayElements(dataJ, data, JNI_ABORT);
 
+    // 返回当前 Buffer 的 Handle
     return (jlong)(__bridge void*) g_uniformBuffers[bufferIndex];
 }
 
 // =========================================================================
-// commitCommandBuffer
+// commitCommandBuffer (修正版：提交后轮转)
 // =========================================================================
 JNIEXPORT void JNICALL 
 Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv *env, jclass clazz, jlong handle) {
     if (!handle) return;
     id<MTLCommandBuffer> buf = (__bridge id<MTLCommandBuffer>)(void*) handle;
     
-    g_currentBufferIndex = (g_currentBufferIndex + 1) % BUFFER_COUNT;
-    
+    // 提交到 GPU
     [buf commit];
+    
+    // 提交后才轮转索引，确保下一帧使用新的 Buffer
+    // 这样理论上当前帧的数据在 GPU 处理完之前不会被覆盖
+    g_currentBufferIndex = (g_currentBufferIndex + 1) % BUFFER_COUNT;
 }
 
 // =========================================================================
@@ -286,7 +292,7 @@ Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(JNIEnv *e
 }
 
 JNIEXPORT jlong JNICALL 
-Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv *env, jclass jclass) {
+Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv *env, jclass clazz) {
     return (jlong)(__bridge_retained void*) g_sharedQueue;
 }
 
