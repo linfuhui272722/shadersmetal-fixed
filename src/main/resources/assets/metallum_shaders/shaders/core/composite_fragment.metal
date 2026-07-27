@@ -2,30 +2,18 @@
 //  composite_fragment.metal
 //  MetallumShaders
 //
-//  诊断版本：如果出现粉色，说明矩阵数据传递有误。
+//  修复版：移除重复定义，保留安全检查
 //
 
 #include <metal_stdlib>
-#include "include/uniforms.metalh"
+#include "include/uniforms.metalh" // 确保引用现有头文件
 using namespace metal;
 
-struct Uniforms {
-    float4x4 viewProj;
-    float4x4 invViewProj;
-    float4 cameraPos;
-    float4 sunDir;
-    float4 sunColor;
-    float4 moonDir;
-    float4 moonColor;
-    float4 timePack;
-    float4 fogPack;
-    float4 bloomPack;
-    float4 resolution;
-};
-
+// 安全的深度反投影辅助函数
 static float3 safeWorldPosFromDepth(float2 uv, float depth, float4x4 invVP) {
     float4 clipPos = float4(uv * 2.0 - 1.0, depth, 1.0);
     float4 worldPos = invVP * clipPos;
+    // 防止除零
     if (worldPos.w == 0.0) return float3(0.0);
     return worldPos.xyz / worldPos.w;
 }
@@ -37,22 +25,25 @@ fragment float4 composite_fragment(
     constant Uniforms& u [[buffer(0)]],
     sampler smp [[sampler(0)]])
 {
+    // 1. UV 修正
     float2 uv = in.uv;
     uv.y = 1.0 - uv.y; // 修正 Y 轴
 
     float4 albedo = colorTex.sample(smp, uv);
     float  depth  = depthTex.sample(smp, uv);
 
-    if (depth >= 0.9999) {
+    // 天空检测
+    if (depth >= 0.9999 || depth <= 0.0001) {
         return float4(albedo.rgb * 1.1, albedo.a);
     }
 
+    // 2. 安全的世界坐标计算
     float3 worldPos = safeWorldPosFromDepth(uv, depth, u.invViewProj);
 
     // ★★★ 诊断核心：如果计算出错，返回亮粉色 ★★★
-    // 如果你看到满屏粉色，说明 Java 端的 invViewProj 矩阵数据是错的。
+    // 如果你看到粉色，说明 Java 端传来的矩阵数据有误。
     if (any(isnan(worldPos)) || any(isinf(worldPos))) {
-        return float4(1.0, 0.0, 1.0, 1.0); // 亮粉色 (Magenta)
+        return float4(1.0, 0.0, 1.0, 1.0); // 亮粉色
     }
 
     float3 diff = u.cameraPos.xyz - worldPos;
@@ -63,7 +54,7 @@ fragment float4 composite_fragment(
     }
     float3 viewDir = diff / viewDist;
 
-    // 法线重建
+    // 3. 法线重建
     float2 texel = 1.0 / u.resolution.xy;
     
     float dR = depthTex.sample(smp, uv + float2( texel.x, 0.0));
@@ -88,7 +79,7 @@ fragment float4 composite_fragment(
 
     if (dot(normal, viewDir) < 0.0) normal = -normal;
 
-    // 光照计算 (完整保留)
+    // 4. 光照计算 (完整逻辑)
     float sunLambert = max(0.0, dot(normal, u.sunDir.xyz));
     float moonLambert = max(0.0, dot(normal, u.moonDir.xyz));
     
@@ -101,7 +92,7 @@ fragment float4 composite_fragment(
 
     float3 lit = albedo.rgb * (sunContribution + moonContribution + skyAmbient);
 
-    // 雾效 (完整保留)
+    // 5. 雾效 (完整逻辑)
     float fogFactor = 1.0 - exp(-u.fogPack.x * pow(viewDist, u.fogPack.y));
     fogFactor = clamp(fogFactor, 0.0, 1.0);
     float3 fogColor = mix(u.sunColor.rgb * 0.45, u.moonColor.rgb * 0.55, smoothstep(0.0, 0.5, u.sunDir.y));
