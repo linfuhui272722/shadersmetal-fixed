@@ -31,6 +31,21 @@ public final class MetalBridge {
     private static Method getColorTextureMethod;
     private static Method getDepthTextureMethod;
 
+    // Unsafe实例
+    private static sun.misc.Unsafe UNSAFE;
+    private static Field addressField;
+    private static long addressFieldOffset = -1;
+
+    static {
+        try {
+            Field theUnsafe = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            UNSAFE = (sun.misc.Unsafe) theUnsafe.get(null);
+        } catch (Throwable t) {
+            LOGGER.warn("Failed to get Unsafe instance", t);
+        }
+    }
+
     // 诊断标志
     private static boolean handleExtractDiagnosed = false;
 
@@ -82,7 +97,6 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetColorTextureHandle();
-            LOGGER.info("getMainColorTextureHandle returned 0x{}", Long.toHexString(handle));
             if (handle <= 0x1000) {
                 LOGGER.debug("Color texture handle {} is invalid (<= 0x1000), skipping", handle);
                 return -1L;
@@ -91,6 +105,7 @@ public final class MetalBridge {
                 return cachedColorTextureHandle;
             }
             cachedColorTextureHandle = handle;
+            LOGGER.info("Color texture handle: 0x{}", Long.toHexString(handle));
             return handle;
 
         } catch (Throwable t) {
@@ -104,7 +119,6 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetDepthTextureHandle();
-            LOGGER.info("getMainDepthTextureHandle returned 0x{}", Long.toHexString(handle));
             if (handle <= 0x1000) {
                 LOGGER.debug("Depth texture handle {} is invalid (<= 0x1000), skipping", handle);
                 return -1L;
@@ -114,6 +128,7 @@ public final class MetalBridge {
                 return cachedDepthTextureHandle;
             }
             cachedDepthTextureHandle = handle;
+            LOGGER.info("Depth texture handle: 0x{}", Long.toHexString(handle));
             return handle;
 
         } catch (Throwable t) {
@@ -240,13 +255,13 @@ public final class MetalBridge {
 
     /**
      * 从 MetalGpuTexture 对象中提取 Metal 纹理句柄（long）
-     * 优先使用 nativeHandle 字段（MemorySegment），并调用 address() 方法
+     * 优先使用 nativeHandle 字段（MemorySegment），并通过 Unsafe 读取其 address
      */
     private static long extractMetalHandle(Object texObj) {
         if (texObj == null) return -1L;
         Class<?> clazz = texObj.getClass();
 
-        // 1. 优先直接访问 nativeHandle 字段
+        // 1. 优先直接访问 nativeHandle 字段（MemorySegment）
         try {
             Field nativeHandleField = clazz.getDeclaredField("nativeHandle");
             nativeHandleField.setAccessible(true);
@@ -338,43 +353,43 @@ public final class MetalBridge {
     }
 
     /**
-     * 从 MemorySegment 对象中提取地址（使用公共方法 address()）
+     * 从 MemorySegment 对象中提取地址（使用 Unsafe 读取 address 字段）
      */
     private static long extractMemorySegmentAddress(Object segmentObj) {
         if (segmentObj == null) return -1L;
+        if (UNSAFE == null) {
+            LOGGER.warn("Unsafe not available");
+            return -1L;
+        }
+
+        // 使用 Unsafe 读取 address 字段
         try {
-            Method addressMethod = segmentObj.getClass().getMethod("address");
-            Object result = addressMethod.invoke(segmentObj);
-            if (result instanceof Long) {
-                long addr = (Long) result;
-                if (addr > 0) {
-                    LOGGER.info("MemorySegment address via method = 0x{}", Long.toHexString(addr));
-                    return addr;
-                }
-            } else if (result instanceof Number) {
-                long addr = ((Number) result).longValue();
-                if (addr > 0) {
-                    LOGGER.info("MemorySegment address via method = 0x{}", Long.toHexString(addr));
-                    return addr;
-                }
+            // 获取 address 字段的偏移量（缓存）
+            if (addressField == null || addressFieldOffset == -1) {
+                addressField = segmentObj.getClass().getDeclaredField("address");
+                addressFieldOffset = UNSAFE.objectFieldOffset(addressField);
+            }
+            long addr = UNSAFE.getLong(segmentObj, addressFieldOffset);
+            if (addr > 0) {
+                LOGGER.info("MemorySegment address via Unsafe = 0x{}", Long.toHexString(addr));
+                return addr;
             }
         } catch (Throwable t) {
-            LOGGER.warn("Failed to get address from MemorySegment via method: {}", t.getMessage());
-            // 尝试直接访问 address 字段
+            LOGGER.warn("Failed to read address field via Unsafe: {}", t.getMessage());
+            // 尝试通过反射调用 address() 方法作为备选
             try {
-                Field addrField = segmentObj.getClass().getDeclaredField("address");
-                addrField.setAccessible(true);
-                Object val = addrField.get(segmentObj);
-                if (val instanceof Long) {
-                    long addr = (Long) val;
+                Method addressMethod = segmentObj.getClass().getMethod("address");
+                Object result = addressMethod.invoke(segmentObj);
+                if (result instanceof Long) {
+                    long addr = (Long) result;
                     if (addr > 0) {
-                        LOGGER.info("MemorySegment address via field = 0x{}", Long.toHexString(addr));
+                        LOGGER.info("MemorySegment address via method = 0x{}", Long.toHexString(addr));
                         return addr;
                     }
-                } else if (val instanceof Number) {
-                    long addr = ((Number) val).longValue();
+                } else if (result instanceof Number) {
+                    long addr = ((Number) result).longValue();
                     if (addr > 0) {
-                        LOGGER.info("MemorySegment address via field = 0x{}", Long.toHexString(addr));
+                        LOGGER.info("MemorySegment address via method = 0x{}", Long.toHexString(addr));
                         return addr;
                     }
                 }
