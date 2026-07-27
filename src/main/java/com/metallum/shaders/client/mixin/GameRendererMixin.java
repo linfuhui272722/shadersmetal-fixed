@@ -29,11 +29,6 @@ public abstract class GameRendererMixin {
     private static final Matrix4f tempProjection = new Matrix4f();
     private static final Matrix4f tempView = new Matrix4f();
     private static ByteBuffer cachedUniformBuffer = null;
-    
-    // ★★★ 双缓冲纹理：必须使用中间纹理，防止读写同一张纹理导致 Metal 崩溃 ★★★
-    private static long cachedTempTextureHandle = -1L;
-    private static int cachedWidth = 0;
-    private static int cachedHeight = 0;
 
     private static void putMatrixSafe(ByteBuffer buf, Matrix4f mat) {
         boolean safe = true;
@@ -78,33 +73,14 @@ public abstract class GameRendererMixin {
         long cmdBuffer = MetalNative.createCommandBuffer();
         if (cmdBuffer <= 0) return;
 
-        // 获取 Metal 原生句柄
         long colorSrc  = MetalBridge.getMainColorTextureHandle();
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
         if (colorSrc <= 0) return;
-
+        
         int width = mc.getWindow().getWidth();
         int height = mc.getWindow().getHeight();
-
-        // ==========================================
-        // 1. 准备中间纹理
-        // ==========================================
-        // 即使句柄是 Metal 的，也不能同时读写同一纹理。
-        // 我们创建一个临时纹理作为 Shader 的输出。
-        if (cachedTempTextureHandle <= 0 || cachedWidth != width || cachedHeight != height) {
-            if (cachedTempTextureHandle > 0) {
-                MetalNative.destroyTexture(cachedTempTextureHandle);
-            }
-            // 创建 RGBA8 纹理
-            cachedTempTextureHandle = MetalNative.createTexture(device, width, height, 0);
-            cachedWidth = width;
-            cachedHeight = height;
-            LOGGER.info("[Metallum] Created temp texture for resolving race condition: {}", cachedTempTextureHandle);
-        }
-        
-        long colorDst = cachedTempTextureHandle;
 
         if (frameCounter % 300 == 0) LOGGER.info("[MetallumMixins] Rendering frame...");
         frameCounter++;
@@ -115,7 +91,7 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.clear();
 
         // ==========================================
-        // 2. 矩阵计算 (关键修复)
+        // 1. 矩阵计算 (Z-Range 修正)
         // ==========================================
         try {
             float fov = 70.0f;
@@ -127,13 +103,12 @@ public abstract class GameRendererMixin {
             tempProjection.identity().perspective((float) Math.toRadians(fov), aspect, 0.05f, 1000.0f);
 
             // ★★★ 核心 Metal 修复：将 OpenGL 的 Z 范围 [-1, 1] 映射到 Metal 的 [0, 1] ★★★
-            // 即使底层是 Metal，Minecraft 计算的投影矩阵依然是 OpenGL 标准的。
+            // 公式：Z_metal = Z_gl * 0.5 + 0.5
             float[] pVals = new float[16];
             tempProjection.get(pVals);
             
-            // 映射公式：Z_metal = Z_gl * 0.5 + 0.5
-            pVals[10] = pVals[10] * 0.5f;       // 缩放系数
-            pVals[14] = pVals[14] * 0.5f + 0.5f; // 偏移
+            pVals[10] = pVals[10] * 0.5f;       
+            pVals[14] = pVals[14] * 0.5f + 0.5f;
             
             tempProjection.set(pVals);
 
@@ -165,7 +140,7 @@ public abstract class GameRendererMixin {
         }
 
         // ==========================================
-        // 3. 填充 Uniform Buffer
+        // 2. 填充 Uniform Buffer
         // ==========================================
         // 1. viewProj (Offset 0)
         putMatrixSafe(cachedUniformBuffer, cachedViewProj);
@@ -210,12 +185,18 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.get(uniformBytes);
 
         // ==========================================
-        // 4. 渲染与回写
+        // 3. 渲染调度
         // ==========================================
         try {
             long uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
             
-            // 第一步：Shader 渲染到临时纹理
+            // 关键逻辑：
+            // 这里我们故意将 colorDst 设置为 colorSrc。
+            // C++ 端的 dispatchFullscreen 会检测到 src == dst，
+            // 自动创建临时纹理进行渲染，然后 Blit 回主纹理。
+            // 这样既解决了读写冲突，又简化了 Java 端代码。
+            long colorDst = colorSrc;
+
             int result = MetalNative.dispatchFullscreen(
                 cmdBuffer, pipeline, colorSrc, depthSrc, normalSrc, colorDst, uniformBuffer, uniformBytes.length
             );
@@ -224,10 +205,6 @@ public abstract class GameRendererMixin {
                 LOGGER.error("Dispatch error: {}", result);
             }
 
-            // 第二步：将处理好的纹理 Blit 回主纹理
-            // 这一步是防止画面闪烁和卡死的关键
-            MetalNative.blitTexture(cmdBuffer, colorDst, colorSrc, width, height);
-            
             MetalNative.commitCommandBuffer(cmdBuffer);
         } catch (Exception e) {
             LOGGER.error("Render error", e);
@@ -236,10 +213,7 @@ public abstract class GameRendererMixin {
 
     @Inject(method = "close", at = @At("RETURN"))
     private void metallum_shaders$onClose(CallbackInfo ci) {
-        if (cachedTempTextureHandle > 0) {
-            MetalNative.destroyTexture(cachedTempTextureHandle);
-            cachedTempTextureHandle = -1;
-        }
+        // 清理逻辑，如果有的话
         ShaderManager.reload();
     }
 }
