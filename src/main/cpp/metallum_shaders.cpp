@@ -18,7 +18,7 @@ extern "C" {
 // =========================================================================
 static id<MTLDevice> g_sharedDevice = nil;
 static id<MTLCommandQueue> g_sharedQueue = nil;
-static id<MTLSamplerState> g_sharedSampler = nil; // ★ 新增：全局采样器
+static id<MTLSamplerState> g_sharedSampler = nil;
 
 // 缓存临时纹理
 static id<MTLTexture> g_cachedTempTexture = nil;
@@ -26,7 +26,7 @@ static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
 static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
 
-// ★★★ 核心修复：三重缓冲 ★★★
+// 三重缓冲
 #define BUFFER_COUNT 3
 static id<MTLBuffer> g_uniformBuffers[BUFFER_COUNT] = { nil, nil, nil };
 static NSUInteger g_currentBufferIndex = 0;
@@ -60,7 +60,7 @@ Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv *env, jclass c
             if (!g_sharedDevice) return 0LL;
             g_sharedQueue = [g_sharedDevice newCommandQueue];
             
-            // ★ 初始化采样器
+            // 初始化采样器
             initSampler();
         }
         return (jlong)(__bridge_retained void*) g_sharedDevice;
@@ -176,7 +176,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                                                                                                 mipmapped:NO];
                 
                 texDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
-                texDesc.storageMode = MTLStorageModePrivate; // 使用 Private 提高性能
+                texDesc.storageMode = MTLStorageModePrivate;
 
                 if (g_sharedDevice) {
                     g_cachedTempTexture = [g_sharedDevice newTextureWithDescriptor:texDesc];
@@ -200,12 +200,9 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     id<MTLRenderCommandEncoder> enc = [cmd renderCommandEncoderWithDescriptor:desc];
     [enc setRenderPipelineState:pipe];
     
-    // ★★★ 关键修复：绑定 Sampler ★★★
+    // 绑定 Sampler
     if (g_sharedSampler) {
         [enc setFragmentSamplerState:g_sharedSampler atIndex:0];
-    } else {
-        // Fallback: Should not happen if init worked
-        NSLog(@"[MetallumShaders] ERROR: Sampler is null!");
     }
     
     [enc setFragmentTexture:colorSrc atIndex:0];
@@ -231,7 +228,7 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 }
 
 // =========================================================================
-// createBuffer (优化：三重缓冲逻辑)
+// createBuffer (修正版：移除 iOS 不支持的 didModifyRange)
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_createBuffer(
@@ -248,6 +245,7 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
         g_uniformBuffers[bufferIndex].length < requiredSize) {
         
         g_uniformBuffers[bufferIndex] = nil;
+        // Shared 模式下，CPU 写入直接对 GPU 可见
         g_uniformBuffers[bufferIndex] = [device newBufferWithLength:allocSize options:MTLResourceStorageModeShared];
     }
 
@@ -255,8 +253,7 @@ Java_com_metallum_shaders_jni_MetalNative_createBuffer(
     void* bufferContents = [g_uniformBuffers[bufferIndex] contents];
     memcpy(bufferContents, data, (size_t)size);
     
-    // ★★★ 关键修复：显式刷新缓存 ★★★
-    [g_uniformBuffers[bufferIndex] didModifyRange:NSMakeRange(0, (NSUInteger)size)];
+    // ★★★ 错误修复：移除 didModifyRange，iOS Shared 模式不需要 ★★★
     
     env->ReleaseByteArrayElements(dataJ, data, JNI_ABORT);
 
@@ -289,7 +286,7 @@ Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(JNIEnv *e
 }
 
 JNIEXPORT jlong JNICALL 
-Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv *env, jclass clazz) {
+Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv *env, jclass jclass) {
     return (jlong)(__bridge_retained void*) g_sharedQueue;
 }
 
