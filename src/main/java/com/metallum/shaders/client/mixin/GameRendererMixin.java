@@ -29,6 +29,11 @@ public abstract class GameRendererMixin {
     private static final Matrix4f tempProjection = new Matrix4f();
     private static final Matrix4f tempView = new Matrix4f();
     private static ByteBuffer cachedUniformBuffer = null;
+    
+    // ★★★ 双缓冲纹理：必须使用中间纹理，防止读写同一张纹理导致 Metal 崩溃 ★★★
+    private static long cachedTempTextureHandle = -1L;
+    private static int cachedWidth = 0;
+    private static int cachedHeight = 0;
 
     private static void putMatrixSafe(ByteBuffer buf, Matrix4f mat) {
         boolean safe = true;
@@ -73,16 +78,33 @@ public abstract class GameRendererMixin {
         long cmdBuffer = MetalNative.createCommandBuffer();
         if (cmdBuffer <= 0) return;
 
+        // 获取 Metal 原生句柄
         long colorSrc  = MetalBridge.getMainColorTextureHandle();
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
         if (colorSrc <= 0) return;
 
-        long colorDst = colorSrc;
-        
         int width = mc.getWindow().getWidth();
         int height = mc.getWindow().getHeight();
+
+        // ==========================================
+        // 1. 准备中间纹理
+        // ==========================================
+        // 即使句柄是 Metal 的，也不能同时读写同一纹理。
+        // 我们创建一个临时纹理作为 Shader 的输出。
+        if (cachedTempTextureHandle <= 0 || cachedWidth != width || cachedHeight != height) {
+            if (cachedTempTextureHandle > 0) {
+                MetalNative.destroyTexture(cachedTempTextureHandle);
+            }
+            // 创建 RGBA8 纹理
+            cachedTempTextureHandle = MetalNative.createTexture(device, width, height, 0);
+            cachedWidth = width;
+            cachedHeight = height;
+            LOGGER.info("[Metallum] Created temp texture for resolving race condition: {}", cachedTempTextureHandle);
+        }
+        
+        long colorDst = cachedTempTextureHandle;
 
         if (frameCounter % 300 == 0) LOGGER.info("[MetallumMixins] Rendering frame...");
         frameCounter++;
@@ -93,7 +115,7 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.clear();
 
         // ==========================================
-        // 1. 矩阵计算
+        // 2. 矩阵计算 (关键修复)
         // ==========================================
         try {
             float fov = 70.0f;
@@ -104,6 +126,18 @@ public abstract class GameRendererMixin {
             
             tempProjection.identity().perspective((float) Math.toRadians(fov), aspect, 0.05f, 1000.0f);
 
+            // ★★★ 核心 Metal 修复：将 OpenGL 的 Z 范围 [-1, 1] 映射到 Metal 的 [0, 1] ★★★
+            // 即使底层是 Metal，Minecraft 计算的投影矩阵依然是 OpenGL 标准的。
+            float[] pVals = new float[16];
+            tempProjection.get(pVals);
+            
+            // 映射公式：Z_metal = Z_gl * 0.5 + 0.5
+            pVals[10] = pVals[10] * 0.5f;       // 缩放系数
+            pVals[14] = pVals[14] * 0.5f + 0.5f; // 偏移
+            
+            tempProjection.set(pVals);
+
+            // 视图矩阵
             tempView.identity();
             
             float pitch = 0, yaw = 0;
@@ -131,9 +165,8 @@ public abstract class GameRendererMixin {
         }
 
         // ==========================================
-        // 2. 严格按照 uniforms.metalh 填充数据
+        // 3. 填充 Uniform Buffer
         // ==========================================
-
         // 1. viewProj (Offset 0)
         putMatrixSafe(cachedUniformBuffer, cachedViewProj);
 
@@ -144,7 +177,7 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.putFloat((float) camera.position().x);
         cachedUniformBuffer.putFloat((float) camera.position().y);
         cachedUniformBuffer.putFloat((float) camera.position().z);
-        cachedUniformBuffer.putFloat(0); // w unused
+        cachedUniformBuffer.putFloat(0); // pad
 
         // 4. sunDir (Offset 144)
         cachedUniformBuffer.putFloat(0).putFloat(1).putFloat(0).putFloat(0);
@@ -166,29 +199,35 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.putFloat(0.002f).putFloat(1.0f).putFloat(0.5f).putFloat(0.2f);
 
         // 10. bloomPack (Offset 240)
-        // bloomThreshold, vignetteStrength, renderScale, pad
         cachedUniformBuffer.putFloat(0.8f).putFloat(0.2f).putFloat(1.0f).putFloat(0);
 
         // 11. resolution (Offset 256)
-        // xy = resolution, z = lightCount, w = pad
         cachedUniformBuffer.putFloat(width).putFloat(height).putFloat(0).putFloat(0);
-
-        // 12. lights[16] (Offset 272)
-        // 我们暂时不处理动态光源，填0即可，确保缓冲区大小足够
-        // 16 * 32 bytes = 512 bytes
-        // 这里不需要手动填充，因为 ByteBuffer 默认就是 0，且我们分配了 2048 字节
 
         cachedUniformBuffer.flip();
 
         byte[] uniformBytes = new byte[cachedUniformBuffer.remaining()];
         cachedUniformBuffer.get(uniformBytes);
 
+        // ==========================================
+        // 4. 渲染与回写
+        // ==========================================
         try {
             long uniformBuffer = MetalNative.createBuffer(device, uniformBytes, uniformBytes.length);
+            
+            // 第一步：Shader 渲染到临时纹理
             int result = MetalNative.dispatchFullscreen(
                 cmdBuffer, pipeline, colorSrc, depthSrc, normalSrc, colorDst, uniformBuffer, uniformBytes.length
             );
-            if (result != 0) LOGGER.error("Dispatch error: {}", result);
+            
+            if (result != 0) {
+                LOGGER.error("Dispatch error: {}", result);
+            }
+
+            // 第二步：将处理好的纹理 Blit 回主纹理
+            // 这一步是防止画面闪烁和卡死的关键
+            MetalNative.blitTexture(cmdBuffer, colorDst, colorSrc, width, height);
+            
             MetalNative.commitCommandBuffer(cmdBuffer);
         } catch (Exception e) {
             LOGGER.error("Render error", e);
@@ -197,6 +236,10 @@ public abstract class GameRendererMixin {
 
     @Inject(method = "close", at = @At("RETURN"))
     private void metallum_shaders$onClose(CallbackInfo ci) {
+        if (cachedTempTextureHandle > 0) {
+            MetalNative.destroyTexture(cachedTempTextureHandle);
+            cachedTempTextureHandle = -1;
+        }
         ShaderManager.reload();
     }
 }
