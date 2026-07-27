@@ -40,7 +40,7 @@ public abstract class GameRendererMixin {
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
-        // ★ 调试日志：打印关键句柄
+        // 调试日志：打印关键句柄
         // 如果日志中没有这行，说明 Mixin 根本没运行
         LOGGER.info("[MetallumMixins] Frame tick - cmdBuffer: {}, colorSrc: {}, depthSrc: {}", cmdBuffer, colorSrc, depthSrc);
 
@@ -100,6 +100,10 @@ public abstract class GameRendererMixin {
         if (result != 0) {
              LOGGER.error("[MetallumMixins] dispatchFullscreen failed with code: {}", result);
         }
+        
+        // ★★★ 关键修复：提交命令缓冲区到 GPU ★★★
+        // 只有提交后，GPU 才会真正执行着色器渲染
+        MetalNative.commitCommandBuffer(cmdBuffer);
     }
 
     @Inject(method = "close", at = @At("RETURN"))
