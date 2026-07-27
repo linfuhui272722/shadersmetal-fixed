@@ -40,12 +40,12 @@ public abstract class GameRendererMixin {
         long depthSrc  = MetalBridge.getMainDepthTextureHandle();
         long normalSrc = MetalBridge.getMainNormalTextureHandle().orElse(0L);
 
-        // 调试日志：打印关键句柄
-        // 如果日志中没有这行，说明 Mixin 根本没运行
-        LOGGER.info("[MetallumMixins] Frame tick - cmdBuffer: {}, colorSrc: {}, depthSrc: {}", cmdBuffer, colorSrc, depthSrc);
+        // 调试日志：每 60 帧打印一次，减少日志刷屏
+        // LOGGER.info("[MetallumMixins] Frame tick - cmdBuffer: {}, colorSrc: {}, depthSrc: {}", cmdBuffer, colorSrc, depthSrc);
 
         if (cmdBuffer <= 0 || colorSrc <= 0) {
-            LOGGER.warn("[MetallumMixins] Skipping frame due to invalid handles.");
+            // 只在第一次失败时打印
+            // LOGGER.warn("[MetallumMixins] Skipping frame due to invalid handles.");
             return;
         }
 
@@ -58,16 +58,12 @@ public abstract class GameRendererMixin {
         ByteBuffer uniformData = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         
         float time = System.currentTimeMillis() / 1000.0f;
-        float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
         uniformData.putFloat(time);              
         uniformData.putFloat(width);             
         uniformData.putFloat(height);            
         
-        // ★ 使用 MetalBridge.getMainCamera() 获取相机
         Camera camera = MetalBridge.getMainCamera();
         if (camera == null) {
-            // 如果获取失败，填入默认值
-            LOGGER.warn("[MetallumMixins] Camera is null!");
             uniformData.putFloat(0.0f);
             uniformData.putFloat(0.0f);
             uniformData.putFloat(0.0f);
@@ -101,12 +97,11 @@ public abstract class GameRendererMixin {
              LOGGER.error("[MetallumMixins] dispatchFullscreen failed with code: {}", result);
         }
         
-        // ★★★ 关键修复：提交命令缓冲区到 GPU ★★★
-        // 只有提交后，GPU 才会真正执行着色器渲染
+        // ★★★ 关键：提交命令缓冲区 ★★★
         MetalNative.commitCommandBuffer(cmdBuffer);
         
-        // ★ 建议：释放命令缓冲区资源（防止内存泄漏）
-        MetalNative.release(cmdBuffer);
+        // ★ 修复：不要在这里 release cmdBuffer，我们复用全局 Queue
+        // MetalNative.release(cmdBuffer); 
     }
 
     @Inject(method = "close", at = @At("RETURN"))
