@@ -53,7 +53,20 @@ fragment float4 composite_fragment(
     float3 pL = worldPosFromDepth(uv + float2(-texel.x, 0.0), dL, u.invViewProj);
     float3 pU = worldPosFromDepth(uv + float2(0.0,  texel.y), dU, u.invViewProj);
     float3 pD = worldPosFromDepth(uv + float2(0.0, -texel.y), dD, u.invViewProj);
-    float3 normal = normalize(cross(pR - pU, pU - pL) + cross(pU - pL, pL - pD));
+
+    // ★★★ CRITICAL FIX: Check length before normalizing ★★★
+    // normalize(0) causes GPU hang/undefined behavior on iOS.
+    float3 rawNormal = cross(pR - pU, pU - pL) + cross(pU - pL, pL - pD);
+    float len = length(rawNormal);
+    
+    float3 normal;
+    if (len < 0.00001) {
+        // Fallback for flat surfaces or bad depth derivatives
+        normal = float3(0.0, 1.0, 0.0);
+    } else {
+        normal = rawNormal / len;
+    }
+
     if (dot(normal, viewDir) < 0.0) normal = -normal;
 
     // ---- 1. Sun + moon directional light ----
