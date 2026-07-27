@@ -38,7 +38,6 @@ public abstract class GameRendererMixin {
 
         if (cmdBuffer <= 0 || colorSrc <= 0) return;
 
-        // 调试：每60帧打印一次，确认运行
         if (frameCounter % 60 == 0) {
              LOGGER.info("[MetallumMixins] Rendering frame...");
         }
@@ -47,7 +46,7 @@ public abstract class GameRendererMixin {
         long colorDst = colorSrc;
         
         int width = Minecraft.getInstance().getWindow().getWidth();
-        int height = Minecraft.getInstance().getWindow().getHeight(); // 修正：正确获取高度
+        int height = Minecraft.getInstance().getWindow().getHeight();
         
         ByteBuffer uniformData = ByteBuffer.allocateDirect(128).order(ByteOrder.nativeOrder());
         uniformData.putFloat(System.currentTimeMillis() / 1000.0f);
@@ -81,10 +80,8 @@ public abstract class GameRendererMixin {
             
             MetalNative.commitCommandBuffer(cmdBuffer);
         } finally {
-            // ★★★ 关键修复：释放 Uniform Buffer，防止内存泄漏 ★★★
-            if (uniformBuffer != 0) {
-                MetalNative.release(uniformBuffer);
-            }
+            // ★★★ 修复：移除 release 调用。我们现在复用全局 Buffer，不需要每帧释放。 ★★★
+            // 如果这里释放，GPU 还在读取，会导致卡死/黑屏。
         }
     }
 
