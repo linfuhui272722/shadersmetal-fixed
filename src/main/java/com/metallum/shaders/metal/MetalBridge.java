@@ -31,6 +31,9 @@ public final class MetalBridge {
     private static Method getColorTextureMethod;
     private static Method getDepthTextureMethod;
 
+    // 诊断标志
+    private static boolean handleExtractDiagnosed = false;
+
     private MetalBridge() {}
 
     public static synchronized void init() {
@@ -79,7 +82,6 @@ public final class MetalBridge {
 
         try {
             long handle = getRenderTargetColorTextureHandle();
-            // 过滤无效句柄（小整数和负值）
             if (handle <= 0x1000) {
                 LOGGER.debug("Color texture handle {} is invalid (<= 0x1000), skipping", handle);
                 return -1L;
@@ -121,7 +123,6 @@ public final class MetalBridge {
     }
 
     public static Optional<Long> getMainNormalTextureHandle() {
-        // 大多数渲染目标没有法线纹理
         return Optional.empty();
     }
 
@@ -239,7 +240,7 @@ public final class MetalBridge {
 
     /**
      * 从 MetalGpuTexture 对象中提取 Metal 纹理句柄（long）
-     * 专门处理 nativeHandle 字段（MemorySegment），使用公共方法 address()
+     * 优先使用 nativeHandle 字段（MemorySegment），并调用 address() 方法
      */
     private static long extractMetalHandle(Object texObj) {
         if (texObj == null) return -1L;
@@ -258,7 +259,7 @@ public final class MetalBridge {
                 }
             }
         } catch (NoSuchFieldException e) {
-            // 如果没有 nativeHandle，继续尝试其他方式
+            // 如果没有 nativeHandle，继续尝试
         } catch (Throwable t) {
             LOGGER.debug("Failed to access nativeHandle: {}", t.getMessage());
         }
@@ -270,7 +271,6 @@ public final class MetalBridge {
                 try {
                     Object result = m.invoke(texObj);
                     if (result != null) {
-                        // 如果返回 MemorySegment
                         if (result.getClass().getName().contains("MemorySegment")) {
                             long addr = extractMemorySegmentAddress(result);
                             if (addr > 0x1000) {
@@ -289,7 +289,9 @@ public final class MetalBridge {
             }
         }
 
-        // 3. 遍历字段（跳过 views 等已知无效字段）
+        // 3. 遍历所有字段（跳过 views, device, mtlPixelFormat 等）
+        //    如果仍未找到，打印诊断信息（仅一次）
+        long lastResort = -1L;
         for (Field f : clazz.getDeclaredFields()) {
             String name = f.getName();
             if ("views".equals(name) || "device".equals(name) || "mtlPixelFormat".equals(name)) {
@@ -299,7 +301,6 @@ public final class MetalBridge {
                 f.setAccessible(true);
                 Object val = f.get(texObj);
                 if (val != null) {
-                    // 如果是 MemorySegment
                     if (val.getClass().getName().contains("MemorySegment")) {
                         long addr = extractMemorySegmentAddress(val);
                         if (addr > 0x1000) {
@@ -317,7 +318,22 @@ public final class MetalBridge {
             } catch (Throwable ignored) {}
         }
 
-        LOGGER.warn("Failed to extract a valid Metal handle from {}", clazz.getName());
+        // 4. 如果所有尝试都失败，打印诊断信息（仅一次）
+        if (!handleExtractDiagnosed) {
+            handleExtractDiagnosed = true;
+            LOGGER.warn("Failed to extract a valid Metal handle from {}", clazz.getName());
+            LOGGER.warn("Fields of {}:", clazz.getName());
+            for (Field f : clazz.getDeclaredFields()) {
+                f.setAccessible(true);
+                try {
+                    Object val = f.get(texObj);
+                    LOGGER.warn("  {} = {} (type {})", f.getName(), val, val != null ? val.getClass().getSimpleName() : "null");
+                } catch (Throwable t) {
+                    LOGGER.warn("  {} : access error", f.getName());
+                }
+            }
+        }
+
         return -1L;
     }
 
@@ -337,13 +353,24 @@ public final class MetalBridge {
                 if (addr > 0) return addr;
             }
         } catch (Throwable t) {
-            LOGGER.debug("Failed to get address from MemorySegment: {}", t.getMessage());
+            // 如果 address() 失败，尝试直接访问 address 字段（备选）
+            try {
+                Field addrField = segmentObj.getClass().getDeclaredField("address");
+                addrField.setAccessible(true);
+                Object val = addrField.get(segmentObj);
+                if (val instanceof Long) {
+                    long addr = (Long) val;
+                    if (addr > 0) return addr;
+                } else if (val instanceof Number) {
+                    long addr = ((Number) val).longValue();
+                    if (addr > 0) return addr;
+                }
+            } catch (Throwable ignored) {}
         }
         return -1L;
     }
 
     private static RenderTarget getRenderTarget() throws Exception {
-        // 1.21 版本：从 GameRenderer 获取 mainRenderTarget
         GameRenderer gameRenderer = Minecraft.getInstance().gameRenderer;
         if (gameRenderer != null) {
             if (renderTargetField == null) {
