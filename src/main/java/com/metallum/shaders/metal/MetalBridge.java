@@ -4,8 +4,8 @@ import com.metallum.shaders.jni.MetalNative;
 import com.metallum.shaders.jni.NativeLoader;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.Camera; // 修复：引入正确的 Camera 类
-import net.minecraft.client.renderer.GameRenderer; // 修复：引入正确的 GameRenderer 类
+import net.minecraft.client.Camera;
+import net.minecraft.client.renderer.GameRenderer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,12 +29,12 @@ public final class MetalBridge {
     private static Field renderTargetField;
     private static Field colorTextureField;
     private static Field depthTextureField;
-    private static Field cameraFieldCache; // 缓存 Camera 字段
+    private static Field cameraFieldCache;
 
     private MetalBridge() {}
 
     public static synchronized void init() {
-        if (initialised) return;
+        if (initialled) return;
         initialised = true;
 
         // 调试日志：确认新代码已加载
@@ -77,10 +77,6 @@ public final class MetalBridge {
     // Camera 获取 (核心修复)
     // =====================================================================
 
-    /**
-     * 获取游戏主相机对象
-     * 修复：根据映射表，Camera 位于 net.minecraft.client 包，且存储在 GameRenderer 中。
-     */
     public static Camera getMainCamera() {
         if (!isAvailable()) return null;
         try {
@@ -89,23 +85,18 @@ public final class MetalBridge {
 
             GameRenderer renderer = mc.gameRenderer;
 
-            // 使用缓存避免每次反射扫描
             if (cameraFieldCache != null) {
                 try {
                     return (Camera) cameraFieldCache.get(renderer);
-                } catch (IllegalAccessException ignored) {
-                    // 缓存失效，重新查找
-                }
+                } catch (IllegalAccessException ignored) {}
             }
 
-            // 通过类型扫描查找 Camera 字段
-            // 这种方法不依赖具体的字段名（如 camera 或 mainCamera），更稳健
             Field[] fields = GameRenderer.class.getDeclaredFields();
             for (Field field : fields) {
                 if (Camera.class.isAssignableFrom(field.getType())) {
                     field.setAccessible(true);
                     cameraFieldCache = field;
-                    LOGGER.debug("Found Camera field in GameRenderer: {}", field.getName());
+                    LOGGER.info("Found Camera field in GameRenderer: {}", field.getName());
                     return (Camera) field.get(renderer);
                 }
             }
@@ -120,19 +111,30 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 纹理获取
+    // 纹理获取 (增加调试日志)
     // =====================================================================
 
     public static long getMainColorTextureHandle() {
         if (!isAvailable()) return -1L;
         try {
             RenderTarget target = getRenderTarget();
-            if (target == null) return -1L;
+            if (target == null) {
+                LOGGER.warn("[Debug] getRenderTarget returned null");
+                return -1L;
+            }
 
             Object tex = getColorTexture(target);
-            if (tex == null) return -1L;
+            if (tex == null) {
+                LOGGER.warn("[Debug] getColorTexture returned null");
+                return -1L;
+            }
 
             long handle = extractHandle(tex);
+            // 只在句柄变化时打印，避免刷屏
+            if (handle != cachedColorTextureHandle) {
+                LOGGER.info("[Debug] Color texture handle updated: {} (0x{})", handle, Long.toHexString(handle));
+            }
+            
             if (handle > 0x1000) {
                 cachedColorTextureHandle = handle;
                 return handle;
@@ -199,11 +201,9 @@ public final class MetalBridge {
 
         if (renderTargetField == null) {
             try {
-                // Mojmap 映射
                 renderTargetField = GameRenderer.class.getDeclaredField("mainRenderTarget");
                 renderTargetField.setAccessible(true);
             } catch (NoSuchFieldException e) {
-                // 备用名称
                 renderTargetField = GameRenderer.class.getDeclaredField("renderTarget");
                 renderTargetField.setAccessible(true);
             }
@@ -212,13 +212,11 @@ public final class MetalBridge {
     }
 
     private static Object getColorTexture(RenderTarget target) throws Exception {
-        // 先尝试方法 (部分映射可能存在方法)
         try {
             Method m = RenderTarget.class.getMethod("getColorTexture");
             return m.invoke(target);
         } catch (NoSuchMethodException ignored) {}
 
-        // 再尝试字段
         if (colorTextureField == null) {
             colorTextureField = RenderTarget.class.getDeclaredField("colorTexture");
             colorTextureField.setAccessible(true);
@@ -239,26 +237,16 @@ public final class MetalBridge {
         return depthTextureField.get(target);
     }
 
-    /**
-     * 从 MetalGpuTexture 提取 nativeHandle 地址
-     * 修复：使用公共 API MemorySegment 接口来避免 IllegalAccessException
-     */
     private static long extractHandle(Object tex) throws Exception {
-        // 1. 获取 nativeHandle 字段
         Field nativeHandleField = tex.getClass().getDeclaredField("nativeHandle");
         nativeHandleField.setAccessible(true);
         Object memorySegment = nativeHandleField.get(tex);
         if (memorySegment == null) return -1L;
 
-        // 2. 关键修复：
-        // 不要使用 memorySegment.getClass() 获取方法，因为那会返回受保护的内部类。
-        // 显式使用公共接口 java.lang.foreign.MemorySegment (Java 22+ 标准 API)
         Class<?> memorySegmentClass;
         try {
-            // Java 22+ 标准路径
             memorySegmentClass = Class.forName("java.lang.foreign.MemorySegment");
         } catch (ClassNotFoundException e) {
-            // 备选：对于较早的孵化器版本 (Java 19-21)
             try {
                 memorySegmentClass = Class.forName("jdk.incubator.foreign.MemorySegment");
             } catch (ClassNotFoundException ex) {
@@ -266,10 +254,7 @@ public final class MetalBridge {
             }
         }
 
-        // 3. 在公共接口上获取 address() 方法
         Method addressMethod = memorySegmentClass.getMethod("address");
-        
-        // 4. 调用获取地址
         return (long) addressMethod.invoke(memorySegment);
     }
 }
