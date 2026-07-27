@@ -24,18 +24,43 @@ public abstract class GameRendererMixin {
     private static final Logger LOGGER = LoggerFactory.getLogger("MetallumShaders/Mixin");
     private static int frameCounter = 0;
 
-    // 复用对象
+    // 复用对象防止 GC
     private static final Matrix4f cachedViewProj = new Matrix4f();
     private static final Matrix4f cachedInvViewProj = new Matrix4f();
     private static final Matrix4f tempProjection = new Matrix4f();
     private static final Matrix4f tempView = new Matrix4f();
     private static ByteBuffer cachedUniformBuffer = null;
 
+    // 辅助方法：将 Matrix4f 写入 ByteBuffer
     private static void putMatrix(ByteBuffer buf, Matrix4f mat) {
         buf.putFloat(mat.m00()); buf.putFloat(mat.m01()); buf.putFloat(mat.m02()); buf.putFloat(mat.m03());
         buf.putFloat(mat.m10()); buf.putFloat(mat.m11()); buf.putFloat(mat.m12()); buf.putFloat(mat.m13());
         buf.putFloat(mat.m20()); buf.putFloat(mat.m21()); buf.putFloat(mat.m22()); buf.putFloat(mat.m23());
         buf.putFloat(mat.m30()); buf.putFloat(mat.m31()); buf.putFloat(mat.m32()); buf.putFloat(mat.m33());
+    }
+
+    // ★★★ 安全写入矩阵：防止 NaN/Infinite 导致 GPU 挂起 ★★★
+    private static void putMatrixSafe(ByteBuffer buf, Matrix4f mat) {
+        boolean safe = true;
+        float[] vals = new float[16];
+        mat.get(vals); // 获取列优先数组
+        
+        for (float v : vals) {
+            if (Float.isNaN(v) || Float.isInfinite(v)) {
+                safe = false;
+                break;
+            }
+        }
+        
+        if (!safe) {
+            LOGGER.warn("[MetallumMixins] Invalid matrix detected (NaN/Infinite), sending Identity.");
+            mat.identity();
+            mat.get(vals);
+        }
+        
+        for (float v : vals) {
+            buf.putFloat(v);
+        }
     }
 
     @Inject(method = "render", at = @At("RETURN"))
@@ -69,7 +94,6 @@ public abstract class GameRendererMixin {
 
         long colorDst = colorSrc;
         
-        // 使用映射表逻辑：getWidth() 依然有效，或使用 mc.getWindow().getWidth()
         int width = mc.getWindow().getWidth();
         int height = mc.getWindow().getHeight();
 
@@ -82,41 +106,35 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.clear();
 
         // ==========================================
-        // 核心矩阵构建 (适配 Mojang 映射)
+        // 核心矩阵构建 (适配 Mojang 映射 + 安全校验)
         // ==========================================
         try {
             // 1. 投影矩阵
-            // mc.options.fov 在 Mojang 映射中通常是字段访问，我们尽量安全访问
             float fov = 70.0f;
             try {
-                // 假设 options.fov 返回 Option<Double>，需要 .get()
-                // 如果这里报错，请改为反射读取或硬编码 70
-                 fov = (float) mc.options.fov().get();
+                // 尝试获取动态 FOV
+                fov = (float) mc.options.fov().get();
             } catch (Exception ignored) {}
 
             float aspect = (float) width / height;
+            // 防止除以零
+            if (aspect <= 0) aspect = 1.0f;
+            
             tempProjection.identity().perspective((float) Math.toRadians(fov), aspect, 0.05f, 1000.0f);
 
             // 2. 视图矩阵
             tempView.identity();
             
             // ★★★ 关键修正：获取旋转 ★★★
-            // 由于 Camera.getXRot/YRot 可能不存在，我们改为直接从玩家获取
-            // 使用映射表：Entity.position() 对应的旋转方法通常也存在
-            // Mojang 映射中 Entity 通常有 getXRot() 和 getYRot()
             float pitch = 0;
             float yaw = 0;
             
             if (mc.player != null) {
-                pitch = mc.player.getXRot(); // Player 继承自 LivingEntity -> Entity
+                pitch = mc.player.getXRot(); // Player 继承自 Entity
                 yaw = mc.player.getYRot();
             } else {
-                // 备用方案：如果 player 为空，尝试从 Camera 读取字段 (如果存在)
-                // 或者放弃旋转，只做平移
-                try {
-                    // 尝试通过反射或直接字段访问，如果 Mojang 映射暴露了这些字段
-                    // 这里为了编译安全，我们假设 player 存在且有效
-                } catch (Exception ignored) {}
+                // 备用：如果 player 为空，尝试从 Camera 读取 (如果有字段访问器)
+                // 这里为了安全，默认为 0
             }
 
             // 应用旋转：Minecraft 的摄像机坐标系
@@ -143,10 +161,11 @@ public abstract class GameRendererMixin {
         }
 
         // --- 填充 Uniforms ---
-        putMatrix(cachedUniformBuffer, cachedViewProj);
-        putMatrix(cachedUniformBuffer, cachedInvViewProj);
+        // 使用 Safe 版本写入矩阵，防止 GPU 挂起
+        putMatrixSafe(cachedUniformBuffer, cachedViewProj);
+        putMatrixSafe(cachedUniformBuffer, cachedInvViewProj);
 
-        // 使用映射表：Camera.position().x (Vec3 字段访问，Mojang 映射中通常为 public 字段)
+        // 使用映射表：Camera.position().x (Vec3 字段访问)
         cachedUniformBuffer.putFloat((float) camera.position().x);
         cachedUniformBuffer.putFloat((float) camera.position().y);
         cachedUniformBuffer.putFloat((float) camera.position().z);
@@ -158,11 +177,12 @@ public abstract class GameRendererMixin {
         cachedUniformBuffer.putFloat(0.4f).putFloat(0.4f).putFloat(0.7f).putFloat(0); // Moon Color
 
         float time = System.currentTimeMillis() / 1000.0f;
-        cachedUniformBuffer.putFloat(time).putFloat(1.0f/60f).putFloat(1.0f).putFloat(1.0f);
-        cachedUniformBuffer.putFloat(0.002f).putFloat(1.0f).putFloat(0.5f).putFloat(0.2f);
-        cachedUniformBuffer.putFloat(0.8f).putFloat(0.2f).putFloat(1.0f).putFloat(0);
-        cachedUniformBuffer.putFloat(width).putFloat(height).putFloat(0).putFloat(0);
+        cachedUniformBuffer.putFloat(time).putFloat(1.0f/60f).putFloat(1.0f).putFloat(1.0f); // Time
+        cachedUniformBuffer.putFloat(0.002f).putFloat(1.0f).putFloat(0.5f).putFloat(0.2f); // Fog
+        cachedUniformBuffer.putFloat(0.8f).putFloat(0.2f).putFloat(1.0f).putFloat(0); // Bloom
+        cachedUniformBuffer.putFloat(width).putFloat(height).putFloat(0).putFloat(0); // Res
 
+        // Pad 剩余空间
         int currentPos = cachedUniformBuffer.position();
         if (currentPos < 784) cachedUniformBuffer.position(784); 
         cachedUniformBuffer.flip();
