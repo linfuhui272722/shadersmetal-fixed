@@ -14,12 +14,10 @@
 extern "C" {
 
 // =========================================================================
-// 全局单例：防止资源耗尽
+// 全局单例
 // =========================================================================
 static id<MTLDevice> g_sharedDevice = nil;
 static id<MTLCommandQueue> g_sharedQueue = nil;
-
-// 缓存临时纹理
 static id<MTLTexture> g_cachedTempTexture = nil;
 static NSUInteger g_cachedWidth = 0;
 static NSUInteger g_cachedHeight = 0;
@@ -29,7 +27,7 @@ static MTLPixelFormat g_cachedFormat = MTLPixelFormatInvalid;
 // getDefaultDevice
 // =========================================================================
 JNIEXPORT jlong JNICALL
-Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv* env, jclass) {
+Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv *env, jclass clazz) {
     @autoreleasepool {
         if (g_sharedDevice == nil) {
             g_sharedDevice = MTLCreateSystemDefaultDevice();
@@ -45,7 +43,7 @@ Java_com_metallum_shaders_jni_MetalNative_getDefaultDevice(JNIEnv* env, jclass) 
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
-    JNIEnv* env, jclass, jlong deviceHandle, jstring sourceJ, jstring nameJ) {
+    JNIEnv *env, jclass clazz, jlong deviceHandle, jstring sourceJ, jstring nameJ) {
 
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
     if (!device) return 0;
@@ -72,7 +70,7 @@ Java_com_metallum_shaders_jni_MetalNative_compileLibrary(
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
-    JNIEnv* env, jclass, jlong deviceHandle, jlong libraryHandle,
+    JNIEnv *env, jclass clazz, jlong deviceHandle, jlong libraryHandle,
     jstring vertexNameJ, jstring fragmentNameJ,
     jint colorFormat, jint depthFormat) {
 
@@ -114,15 +112,13 @@ Java_com_metallum_shaders_jni_MetalNative_buildPostPipeline(
 }
 
 // =========================================================================
-// dispatchFullscreen (修复：纹理缓存 + 同步)
+// dispatchFullscreen
 // =========================================================================
 JNIEXPORT jint JNICALL
 Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
-    JNIEnv* env, jclass,
-    jlong cmdBufferHandle, jlong pipelineHandle,
-    jlong colorSrcHandle, jlong depthSrcHandle,
-    jlong normalSrcHandle, jlong colorDstHandle,
-    jlong uniformBufferHandle, jlong uniformSize) {
+    JNIEnv *env, jclass clazz, jlong cmdBufferHandle, jlong pipelineHandle,
+    jlong colorSrcHandle, jlong depthSrcHandle, jlong normalSrcHandle, 
+    jlong colorDstHandle, jlong uniformBufferHandle, jlong uniformSize) {
 
     id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)(void*) cmdBufferHandle;
     id<MTLRenderPipelineState> pipe = (__bridge id<MTLRenderPipelineState>)(void*) pipelineHandle;
@@ -139,7 +135,6 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
     if (colorSrc == colorDst) {
         needsBlit = true;
         
-        // 检查缓存纹理是否有效
         if (g_cachedTempTexture == nil || 
             g_cachedWidth != colorDst.width || 
             g_cachedHeight != colorDst.height ||
@@ -151,7 +146,6 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
                                                                                                    height:colorDst.height
                                                                                                 mipmapped:NO];
                 
-                // 关键：使用 Shared 模式以确保兼容性，标记 RenderTarget 用途
                 texDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
                 texDesc.storageMode = MTLStorageModeShared; 
 
@@ -198,54 +192,55 @@ Java_com_metallum_shaders_jni_MetalNative_dispatchFullscreen(
 }
 
 // =========================================================================
-// createBuffer (修改：每帧创建新 Buffer，不复用，避免 CPU/GPU 竞争)
+// createBuffer
 // =========================================================================
 JNIEXPORT jlong JNICALL
 Java_com_metallum_shaders_jni_MetalNative_createBuffer(
-    JNIEnv* env, jclass, jlong deviceHandle, jbyteArray dataJ, jlong size) {
+    JNIEnv *env, jclass clazz, jlong deviceHandle, jbyteArray dataJ, jlong size) {
 
     id<MTLDevice> device = (__bridge id<MTLDevice>)(void*) deviceHandle;
     if (!device || !dataJ) return 0;
 
     jbyte* data = env->GetByteArrayElements(dataJ, nullptr);
-    
-    // ★★★ 安全修复：每帧创建新 Buffer ★★★
-    // 避免复用导致 CPU 写入时 GPU 正在读取上一帧数据 (闪烁)
-    // Uniform Buffer 很小 (几百字节)，不会造成内存压力
-    id<MTLBuffer> buf = [device newBufferWithBytes:data
-                                            length:(NSUInteger) size
-                                           options:MTLResourceStorageModeShared];
-    
-    // 确保数据对 CPU 和 GPU 可见 (Shared 模式必须)
-    // [buf didModifyRange:NSMakeRange(0, size)]; // Optional for Shared memory
-    
+    id<MTLBuffer> buf = [device newBufferWithBytes:data length:(NSUInteger) size options:MTLResourceStorageModeShared];
     env->ReleaseByteArrayElements(dataJ, data, JNI_ABORT);
 
     return (jlong) (__bridge_retained void*) buf;
 }
 
 // =========================================================================
-// release (修改：不做任何事)
+// release
 // =========================================================================
 JNIEXPORT void JNICALL
-Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv*, jclass, jlong handle) {
+Java_com_metallum_shaders_jni_MetalNative_release(JNIEnv *env, jclass clazz, jlong handle) {
     if (!handle) return;
-    // 全局资源（Device, Queue, cachedTex）不应该被释放
-    // 每帧的小 Buffer 由 ARC 自动回收，我们在这里不手动释放，防止释放过早导致崩溃
+    // Do nothing, safe guard
 }
 
 // =========================================================================
 // 其他方法
 // =========================================================================
-JNIEXPORT jlong JNICALL Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(JNIEnv* env, jclass, jint textureId) { return 0LL; }
+JNIEXPORT jlong JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_getMetalTextureFromGLTexture(JNIEnv *env, jclass clazz, jint textureId) {
+    return 0LL;
+}
 
-JNIEXPORT jlong JNICALL Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv* env, jclass) {
+JNIEXPORT jlong JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_getDefaultCommandQueue(JNIEnv *env, jclass clazz) {
     return (jlong)(__bridge_retained void*) g_sharedQueue;
 }
 
-JNIEXPORT jlong JNICALL Java_com_metallum_shaders_jni_MetalNative_createCommandBuffer(JNIEnv* env, jclass) {
+JNIEXPORT jlong JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_createCommandBuffer(JNIEnv *env, jclass clazz) {
     if (!g_sharedQueue) return 0LL;
     return (jlong)(__bridge_retained void*) [g_sharedQueue commandBuffer];
 }
 
-JNIEXPORT void JNICALL Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv* 
+JNIEXPORT void JNICALL 
+Java_com_metallum_shaders_jni_MetalNative_commitCommandBuffer(JNIEnv *env, jclass clazz, jlong handle) {
+    if (!handle) return;
+    id<MTLCommandBuffer> buf = (__bridge id<MTLCommandBuffer>)(void*) handle;
+    [buf commit];
+}
+
+} // extern "C"
