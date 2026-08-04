@@ -21,9 +21,11 @@ public final class MetalBridge {
     private static volatile boolean available = false;
     private static long deviceHandle = -1L;
 
-    // 缓存纹理句柄
+    // 缓存纹理句柄和上次验证时间
     private static long cachedColorTextureHandle = -1L;
     private static long cachedDepthTextureHandle = -1L;
+    private static long lastTextureValidationTime = 0;
+    private static final long TEXTURE_CACHE_VALIDITY_MS = 100; // 100ms缓存有效期
 
     // 反射缓存
     private static Field renderTargetField;
@@ -31,14 +33,17 @@ public final class MetalBridge {
     private static Field depthTextureField;
     private static Field cameraFieldCache;
 
+    // 错误计数器
+    private static int consecutiveErrors = 0;
+    private static final int MAX_CONSECUTIVE_ERRORS = 5;
+
     private MetalBridge() {}
 
     public static synchronized void init() {
         if (initialised) return;
         initialised = true;
 
-        // 调试日志：确认新代码已加载
-        LOGGER.info("=== MetalBridge NEW CODE v2.0 LOADED ===");
+        LOGGER.info("=== MetalBridge v2.1 LOADED ===");
 
         try {
             if (!NativeLoader.ensureLoaded()) {
@@ -53,7 +58,7 @@ public final class MetalBridge {
             }
 
             available = true;
-            LOGGER.info("MetalBridge initialised");
+            LOGGER.info("MetalBridge initialised with device: 0x{}", Long.toHexString(deviceHandle));
         } catch (Throwable t) {
             LOGGER.warn("Failed to initialise MetalBridge", t);
         }
@@ -61,7 +66,7 @@ public final class MetalBridge {
 
     public static boolean isAvailable() {
         if (!initialised) init();
-        return available;
+        return available && deviceHandle > 0;
     }
 
     public static long getDeviceHandle() {
@@ -74,7 +79,7 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // Camera 获取 (核心修复)
+    // Camera 获取
     // =====================================================================
 
     public static Camera getMainCamera() {
@@ -111,43 +116,63 @@ public final class MetalBridge {
     }
 
     // =====================================================================
-    // 纹理获取 (增加调试日志)
+    // 纹理获取 - 改进版本，带缓存和验证
     // =====================================================================
 
     public static long getMainColorTextureHandle() {
         if (!isAvailable()) return -1L;
+        
+        // 缓存检查：避免频繁反射调用
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastTextureValidationTime < TEXTURE_CACHE_VALIDITY_MS 
+            && cachedColorTextureHandle > 0) {
+            return cachedColorTextureHandle;
+        }
+
         try {
             RenderTarget target = getRenderTarget();
             if (target == null) {
-                LOGGER.warn("[Debug] getRenderTarget returned null");
+                handleError("getRenderTarget returned null");
                 return -1L;
             }
 
             Object tex = getColorTexture(target);
             if (tex == null) {
-                LOGGER.warn("[Debug] getColorTexture returned null");
+                handleError("getColorTexture returned null");
                 return -1L;
             }
 
             long handle = extractHandle(tex);
-            // 只在句柄变化时打印，避免刷屏
-            if (handle != cachedColorTextureHandle) {
-                LOGGER.info("[Debug] Color texture handle updated: {} (0x{})", handle, Long.toHexString(handle));
+            
+            // 验证句柄有效性
+            if (!isValidHandle(handle)) {
+                handleError("Invalid color texture handle: " + handle);
+                return -1L;
             }
             
-            if (handle > 0x1000) {
-                cachedColorTextureHandle = handle;
-                return handle;
-            }
-            return -1L;
+            // 更新缓存
+            cachedColorTextureHandle = handle;
+            lastTextureValidationTime = currentTime;
+            consecutiveErrors = 0; // 重置错误计数
+            
+            return handle;
+            
         } catch (Throwable t) {
-            LOGGER.warn("Failed to get color texture", t);
+            handleError("Exception getting color texture: " + t.getMessage());
             return -1L;
         }
     }
 
     public static long getMainDepthTextureHandle() {
         if (!isAvailable()) return -1L;
+        
+        // 缓存检查
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastTextureValidationTime < TEXTURE_CACHE_VALIDITY_MS 
+            && cachedDepthTextureHandle > 0) {
+            return cachedDepthTextureHandle;
+        }
+
         try {
             RenderTarget target = getRenderTarget();
             if (target == null) return -1L;
@@ -156,11 +181,16 @@ public final class MetalBridge {
             if (tex == null) return -1L;
 
             long handle = extractHandle(tex);
-            if (handle > 0x1000) {
-                cachedDepthTextureHandle = handle;
-                return handle;
+            
+            if (!isValidHandle(handle)) {
+                return -1L;
             }
-            return -1L;
+            
+            cachedDepthTextureHandle = handle;
+            lastTextureValidationTime = currentTime;
+            
+            return handle;
+            
         } catch (Throwable t) {
             LOGGER.warn("Failed to get depth texture", t);
             return -1L;
@@ -192,8 +222,26 @@ public final class MetalBridge {
     public static void submitCommandBuffer() {}
 
     // =====================================================================
-    // 核心方法
+    // 辅助方法
     // =====================================================================
+
+    private static boolean isValidHandle(long handle) {
+        // 有效的句柄应该大于一定值，并且是合理的内存地址
+        return handle > 0x1000 && handle < Long.MAX_VALUE;
+    }
+
+    private static void handleError(String message) {
+        consecutiveErrors++;
+        if (consecutiveErrors <= 3) {
+            LOGGER.warn("[MetalBridge] {}", message);
+        }
+        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            LOGGER.error("[MetalBridge] Too many consecutive errors, clearing texture cache");
+            cachedColorTextureHandle = -1L;
+            cachedDepthTextureHandle = -1L;
+            consecutiveErrors = 0;
+        }
+    }
 
     private static RenderTarget getRenderTarget() throws Exception {
         GameRenderer gameRenderer = Minecraft.getInstance().gameRenderer;
